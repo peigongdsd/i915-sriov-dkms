@@ -56,27 +56,17 @@ static struct xe_device *relay_to_xe(struct xe_guc_relay *relay)
 	return gt_to_xe(relay_to_gt(relay));
 }
 
-#define XE_RELAY_DIAG_RATELIMIT_INTERVAL	(10 * HZ)
-#define XE_RELAY_DIAG_RATELIMIT_BURST		10
-
-#define relay_notice(relay, fmt...) ({					\
-	typeof(relay) _r = (relay);						\
-	if (___ratelimit(&_r->diag_ratelimit, "xe_guc_relay"))			\
-		xe_gt_sriov_notice(relay_to_gt(_r), "relay: " fmt);		\
-})
+#define relay_notice(relay, fmt...) \
+	xe_gt_sriov_notice(relay_to_gt(relay), "relay: " fmt)
 
 /*
- * Keep verbose relay tracing fully disabled when CONFIG_DRM_XE_DEBUG_SRIOV is
- * off. Otherwise the ratelimit callback itself can emit the generic
- * "xe_guc_relay callbacks suppressed" message even though dbg_verbose() has
- * compiled out and no relay payload was actually printed.
+ * Keep relay diagnostics unsuppressed while debugging MTL/ARL SR-IOV. The
+ * generic "xe_guc_relay callbacks suppressed" line hides the actual relay
+ * payload we need to see in dmesg.
  */
 #ifdef CONFIG_DRM_XE_DEBUG_SRIOV
-#define relay_debug(relay, fmt...) ({					\
-	typeof(relay) _r = (relay);						\
-	if (___ratelimit(&_r->diag_ratelimit, "xe_guc_relay"))			\
-		xe_gt_sriov_dbg(relay_to_gt(_r), "relay: " fmt);		\
-})
+#define relay_debug(relay, fmt...) \
+	xe_gt_sriov_dbg(relay_to_gt(relay), "relay: " fmt)
 #else
 #define relay_debug(relay, fmt...) typecheck(struct xe_guc_relay *, (relay))
 #endif
@@ -368,9 +358,6 @@ int xe_guc_relay_init(struct xe_guc_relay *relay)
 	INIT_WORK(&relay->worker, relays_worker_fn);
 	INIT_LIST_HEAD(&relay->pending_relays);
 	INIT_LIST_HEAD(&relay->incoming_actions);
-	ratelimit_state_init(&relay->diag_ratelimit,
-			     XE_RELAY_DIAG_RATELIMIT_INTERVAL,
-			     XE_RELAY_DIAG_RATELIMIT_BURST);
 
 	err = mempool_init_kmalloc_pool(&relay->pool, XE_RELAY_MEMPOOL_MIN_NUM +
 					relay_get_totalvfs(relay),
