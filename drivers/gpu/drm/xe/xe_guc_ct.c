@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/fault-inject.h>
 #include <linux/ktime.h>
+#include <linux/ratelimit.h>
 
 #include <kunit/static_stub.h>
 
@@ -29,6 +30,7 @@
 #include "xe_gt_sriov_pf_control.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_monitor.h"
+#include "xe_gt_sriov_printk.h"
 #include "xe_gt_sriov_pf_service_types.h"
 #include "xe_ggtt.h"
 #include "xe_guc.h"
@@ -49,6 +51,8 @@ static void safe_mode_worker_func(struct work_struct *w);
 static void ct_exit_safe_mode(struct xe_guc_ct *ct);
 static void guc_ct_change_state(struct xe_guc_ct *ct,
 				enum xe_guc_ct_state state);
+
+static DEFINE_RATELIMIT_STATE(mmio_relay_trace_rs, 2 * HZ, 40);
 
 #if IS_ENABLED(CONFIG_DRM_XE_DEBUG)
 enum {
@@ -1735,6 +1739,15 @@ static int mmio_relay_process(struct xe_guc *guc, struct xe_gt *gt,
 	if (unlikely(!vfid))
 		return -EPROTO;
 
+	if (__ratelimit(&mmio_relay_trace_rs))
+		xe_gt_sriov_notice(gt,
+				   "MMIO relay VF%u opcode=%#x magic=%#x raw=%#x %#x %#x %#x\n",
+				   vfid, opcode, magic,
+				   msg[2],
+				   len > 3 ? msg[3] : 0,
+				   len > 4 ? msg[4] : 0,
+				   len > 5 ? msg[5] : 0);
+
 	mmio_relay_trace_update(gt, vfid, opcode, magic, msg + 2);
 
 	switch (opcode) {
@@ -1752,8 +1765,12 @@ static int mmio_relay_process(struct xe_guc *guc, struct xe_gt *gt,
 		break;
 	}
 
-	if (unlikely(err < 0))
+	if (unlikely(err < 0)) {
+		xe_gt_sriov_notice(gt,
+				   "MMIO relay VF%u opcode=%#x magic=%#x failed (%pe)\n",
+				   vfid, opcode, magic, ERR_PTR(err));
 		mmio_relay_send_error(guc, vfid, magic, -err);
+	}
 
 	return err;
 }

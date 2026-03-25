@@ -1,0 +1,310 @@
+MTL/ARL xe SR-IOV investigation notes
+Date: 2026-03-25
+Repo: /home/krusl/code/i915-sriov-dkms
+
+1. Repository state and comparison baseline
+
+- Local branch at the start of this investigation matched the state referenced by:
+  - https://github.com/strongtz/i915-sriov-dkms/pull/415
+  - https://github.com/strongtz/i915-sriov-dkms/issues/358
+- Local HEAD was verified to match upstream PR #415 commit f7790b5.
+- Upstream strongtz/master at the time of inspection was commit 0481357.
+- This means the current local xe MTL/ARL SR-IOV implementation being debugged is effectively the PR #415 state plus the local debug instrumentation added in this session.
+
+2. What the current xe MTL/ARL implementation actually does
+
+The current xe implementation does not have a separate Arrow Lake specific SR-IOV implementation. Instead, ARL is intentionally mapped onto the Meteor Lake path.
+
+The enablement starts in drivers/gpu/drm/xe/xe_pci.c:
+
+- The shared MTL descriptor has SR-IOV enabled.
+- Both INTEL_MTL_IDS and INTEL_ARL_IDS are routed through the same MTL descriptor.
+
+This mirrors what i915 is already doing:
+
+- i915 uses mtl_info as the shared platform info.
+- Both ARL and MTL IDs point to that same MTL-oriented info.
+
+Conclusion:
+
+- In xe, Arrow Lake is intentionally coded as "MTL-like" for SR-IOV.
+- Therefore any ARL bug seen today is very likely either:
+  - a general MTL xe SR-IOV bug,
+  - a missing xe port of an i915 MTL-era SR-IOV mechanism,
+  - or a latent display/media path issue that only becomes visible on ARL test setups.
+
+3. Where the xe SR-IOV work differs from upstream strongtz/master
+
+The xe delta for this PR-sized work is concentrated and not spread randomly across the tree. The important files are:
+
+- drivers/gpu/drm/xe/xe_pci.c
+  - enables SR-IOV for the MTL path
+  - maps ARL onto MTL
+
+- drivers/gpu/drm/xe/xe_pci_sriov.c
+  - PF/VF bring-up and teardown adjustments
+  - MTL-specific GSC and PXP gating
+
+- drivers/gpu/drm/xe/xe_gt_sriov_pf_service.c
+  - PF-side VF service handling
+  - runtime register service
+  - VF2PF_UPDATE_GGTT32 support
+
+- drivers/gpu/drm/xe/xe_guc_ct.c
+  - GuC G2H handling
+  - MMIO relay processing path for VF-originated proxy traffic
+
+- drivers/gpu/drm/xe/xe_ggtt.c
+  - VF GGTT update handling
+  - deferred invalidate behavior
+
+- drivers/gpu/drm/xe/xe_gt_sriov_pf_config.c
+- drivers/gpu/drm/xe/xe_gt_sriov_pf_config_types.h
+  - PF shadow GGTT-related tracking
+
+- drivers/gpu/drm/xe/xe_gt_sriov_pf_control.c
+  - PF control and FLR related state handling
+  - some of the heavy debug trace infrastructure already present in the tree
+
+4. What this implementation appears to be porting from i915
+
+This xe work is not inventing an unrelated SR-IOV model. It is mostly reproducing major i915 SR-IOV mechanisms for the MTL class of platforms.
+
+The i915 side already has:
+
+- PF runtime service and runtime register export
+- MMIO relay service for VF access to PF-mediated registers
+- GGTT shadow management for VF updates
+- VF2PF_UPDATE_GGTT32 handling
+- MTL-specific runtime/service behavior
+
+Relevant i915 implementation areas inspected:
+
+- drivers/gpu/drm/i915/gt/iov/intel_iov_service.c
+- drivers/gpu/drm/i915/gt/iov/intel_iov_ggtt.c
+- drivers/gpu/drm/i915/gt/iov/intel_iov.c
+- drivers/gpu/drm/i915/gt/iov/intel_iov_query.c
+- drivers/gpu/drm/i915/i915_pci.c
+
+Practical interpretation:
+
+- The xe code path should not be assumed complete simply because the high-level mechanisms exist.
+- The failure mode can still be caused by a partial port, a missing register set, incomplete service proxy coverage, missing forcewake behavior, or a mismatch in MMIO/GGTT semantics that i915 already solved.
+
+5. Gaps noticed when comparing xe against i915
+
+The most important gaps I noticed before instrumenting anything were:
+
+- xe's MTL runtime register coverage appears smaller than i915's MTL runtime coverage.
+- i915 explicitly handles some MTL/media runtime access with forcewake around the capture path.
+- i915 has tighter platform/version gating around some MMIO relay functionality, especially around GGTT update support.
+- i915 VF runtime query logic includes multiple paths and fallback behavior that xe does not fully mirror.
+
+This does not prove the bug is runtime coverage, but it means runtime coverage alone cannot be ruled out as "already solved".
+
+At the same time, your report that runtime-register coverage debugging did not yield much is useful, because it reduces confidence that the bug is purely "one missing runtime register". It shifts suspicion toward:
+
+- MMIO relay traffic behavior,
+- GGTT update/shadow/invalidate behavior,
+- inaccessible or unimplemented VF-side MMIO writes,
+- or a still-missing piece of service proxy logic.
+
+6. Observed symptoms from the ARL test system
+
+Reported symptoms:
+
+- small glitches in Windows taskbar
+- small glitches in Start menu
+- small glitches in Settings
+- small glitches in Windows Explorer
+- small glitches in Firefox
+- hardware-accelerated video in Firefox and mpv shows bad colors and corruption on the top half of the image
+- host dmesg emits many "xe_guc_relay callbacks suppressed" lines when the video starts
+- VLC, Chromium-based browsers, and Sunshine do not appear to hit the same decode corruption or the same relay suppression pattern
+
+Why this matters:
+
+- The fact that some apps are clean and others are not suggests the issue is not a broad "all rendering is broken" failure.
+- The pattern is more consistent with a specific surface handling, decode, or presentation path that happens to exercise VF proxying differently.
+- Firefox and mpv likely stress a path that uses either:
+  - a more sensitive decode surface format/layout,
+  - a different direct/composited presentation path,
+  - or a PF-mediated MMIO/GGTT path more intensely than Chromium/VLC/Sunshine.
+
+7. Current working hypothesis
+
+The leading suspects remain:
+
+- Missing or incomplete service proxy behavior in xe for the MTL/ARL path
+- MMIO relay traffic processing gaps
+- GGTT PTE update / shadow update / invalidate behavior
+- VF writes that xe currently treats as inaccessible but which i915 effectively supports through a mediated path
+- Less likely but still possible: missing runtime register service details for media/display
+
+The bug looks more like a targeted VF resource/programming issue than a general render engine failure.
+
+The strongest signal is:
+
+- corruption appears in UI/compositor-like surfaces and some decode/video surfaces
+- relay suppression lines appear specifically when the broken video path starts
+
+That combination is consistent with "a proxy path is getting exercised hard right when those surfaces are initialized or updated".
+
+8. About the "xe_guc_relay callbacks suppressed" message
+
+This message looked suspicious for another reason: it could be partly misleading.
+
+In drivers/gpu/drm/xe/xe_guc_relay.c there was a diagnostic pattern where the relay ratelimit callback could still be hit even when the verbose SR-IOV debug print itself was compiled out.
+
+Effect:
+
+- the ratelimit bucket could be consumed
+- the kernel could emit the generic "callbacks suppressed" line
+- but there might be no useful relay payload visible in dmesg
+
+So one possible interpretation of the previous logs was:
+
+- not necessarily "relay is failing here"
+- but "relay diagnostic ratelimiting is being exercised here"
+
+That did not explain the graphics bug by itself, but it did mean the existing log was low-signal and could hide the real operation mix.
+
+9. Instrumentation added in this session
+
+The goal of the patch set added in this session is not to assume the root cause. The goal is to expose which VF proxy paths are actually getting hit during the corruption.
+
+9.1 drivers/gpu/drm/xe/xe_guc_relay.c
+
+Change:
+
+- prevent the verbose relay debug ratelimit path from firing when CONFIG_DRM_XE_DEBUG_SRIOV is off
+
+Why:
+
+- avoids misleading generic "xe_guc_relay callbacks suppressed" messages that can happen even when no actual verbose payload would have been printed
+
+Expected effect:
+
+- if the previous suppression lines were mostly phantom ratelimit noise, they should disappear or reduce significantly
+- any remaining relay-related lines should be higher signal
+
+9.2 drivers/gpu/drm/xe/xe_guc_ct.c
+
+Change:
+
+- added ratelimited MMIO relay notices in mmio_relay_process()
+- logs VF id, opcode, magic, and raw message dwords
+- logs failures explicitly with the same identifying information
+
+Why:
+
+- this is the central place where GuC-delivered VF MMIO relay requests are interpreted on the PF side
+- if video start or compositor corruption is triggering a specific relay opcode flood, this should reveal which class of traffic is involved
+
+What this can tell us:
+
+- opcode patterns during glitch reproduction
+- whether the problem clusters around runtime/MMIO reads, GGTT update requests, or another relay action
+- whether relay failures are occurring, not just relay traffic volume
+
+9.3 drivers/gpu/drm/xe/xe_gt_sriov_vf.c
+
+Changes:
+
+- added ratelimited logs when VF runtime register lookup fails on read
+- added ratelimited logs when VF tries to write an inaccessible register
+- included caller symbol in both cases
+
+Why:
+
+- if xe is still missing a needed service-proxied register or MMIO write path, this is one of the fastest ways to see it during real workloads
+- caller symbols are especially useful because they can correlate the failed access with the render/media/display call chain
+
+What this can tell us:
+
+- whether the corruption corresponds to repeated runtime register misses
+- whether a specific inaccessible write is occurring during Firefox/mpv video start
+- whether the missing action is clustered in one engine/domain/path
+
+10. Build validation
+
+Build command used:
+
+- nix build .#checks.x86_64-linux.build-i915-sriov
+
+Important note:
+
+- The current flake does not export xe-sriov as a direct packages.x86_64-linux output.
+- The existing flake-exposed build target is checks.x86_64-linux.build-i915-sriov.
+- That check constructs a dummy NixOS system whose boot.extraModulePackages includes both pkgs.i915-sriov and pkgs.xe-sriov.
+- Therefore this build path does compile xe.ko and the xe SR-IOV module derivation.
+
+Actual observed build result:
+
+- initial build failed because xe_guc_ct.c used xe_gt_sriov_notice() without including xe_gt_sriov_printk.h
+- that was fixed by adding the missing include
+- rebuild succeeded
+- the xe derivation completed and produced xe.ko successfully
+
+11. Current interpretation of likely next-step signals
+
+When you test this build, the most valuable new dmesg evidence will be:
+
+- MMIO relay VF... opcode=...
+- MMIO relay VF... failed (...)
+- VF missing runtime reg raw=... adj=... caller=...
+- VF write to inaccessible reg raw=... adj=... val=... caller=...
+
+How to interpret the new output:
+
+- If the old bare "xe_guc_relay callbacks suppressed" noise mostly disappears:
+  - the old message was at least partly a logging artifact
+
+- If MMIO relay logs concentrate on one opcode during video start:
+  - that narrows the failing mediated operation class sharply
+
+- If VF missing runtime reg messages appear:
+  - there is still a missing runtime/service-proxy register path in xe
+
+- If VF write to inaccessible reg appears repeatedly:
+  - xe is likely still lacking a required mediated write or whitelist/proxy route
+
+- If relay failure lines appear with a stable opcode/magic pattern:
+  - that becomes the highest priority place to inspect next
+
+12. Why I do not think the code should be assumed complete
+
+This is important enough to say explicitly:
+
+- The current xe MTL/ARL path should not be assumed complete just because it boots, enumerates, and partially works.
+- The fact that i915 already supports MTL-class SR-IOV does not imply xe's port is complete.
+- The missing piece could still be:
+  - service proxy coverage
+  - runtime/MMIO handling
+  - GGTT shadow update behavior
+  - forcewake-sensitive media register capture
+  - relay opcode support details
+  - or an access path that i915 effectively handles but xe currently drops or approximates
+
+13. Immediate recommended test collection
+
+After installing the test build and reproducing the broken Firefox or mpv video path, collect dmesg lines matching:
+
+- xe_guc_relay
+- MMIO relay
+- VF missing runtime reg
+- VF write to inaccessible reg
+
+Suggested command:
+
+  dmesg -T | grep -E "xe_guc_relay|MMIO relay|VF missing runtime reg|VF write to inaccessible reg"
+
+14. Files changed by this debug patch
+
+- drivers/gpu/drm/xe/xe_guc_relay.c
+- drivers/gpu/drm/xe/xe_guc_ct.c
+- drivers/gpu/drm/xe/xe_gt_sriov_vf.c
+
+15. Summary in one paragraph
+
+The current xe ARL behavior is effectively the MTL SR-IOV path, which is a partial xe-side port of mechanisms that i915 already has for MTL-class SR-IOV. The visible failures do not look like total render failure; they look more like a specific VF mediated access path is incomplete or incorrect, especially around MMIO relay, GGTT update behavior, or inaccessible/missing VF register operations. The old relay suppression message was too noisy to trust on its own, so the patch added in this session is designed to reveal which exact relay and VF MMIO paths are exercised when the corruption begins.

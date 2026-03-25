@@ -5,6 +5,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/bsearch.h>
+#include <linux/ratelimit.h>
 
 #include <drm/drm_managed.h>
 #include <drm/drm_print.h>
@@ -40,6 +41,9 @@
 #include "xe_wopcm.h"
 
 #define make_u64_from_u32(hi, lo) ((u64)((u64)(u32)(hi) << 32 | (u32)(lo)))
+
+static DEFINE_RATELIMIT_STATE(vf_missing_runtime_reg_rs, 5 * HZ, 20);
+static DEFINE_RATELIMIT_STATE(vf_inaccessible_write_rs, 5 * HZ, 20);
 
 static int guc_action_vf_reset(struct xe_guc *guc)
 {
@@ -978,6 +982,10 @@ u32 xe_gt_sriov_vf_read32(struct xe_gt *gt, struct xe_reg reg)
 
 	rr = vf_lookup_reg(gt, addr);
 	if (!rr) {
+		if (__ratelimit(&vf_missing_runtime_reg_rs))
+			xe_gt_sriov_notice(gt,
+					   "VF missing runtime reg raw=%#x adj=%#x caller=%pS\n",
+					   reg.addr, addr, (void *)_RET_IP_);
 		xe_gt_WARN(gt, IS_ENABLED(CONFIG_DRM_XE_DEBUG),
 			   "VF is trying to read an inaccessible register %#x+%#x\n",
 			   reg.addr, addr - reg.addr);
@@ -1009,6 +1017,10 @@ void xe_gt_sriov_vf_write32(struct xe_gt *gt, struct xe_reg reg, u32 val)
 	 * registers in some custom way, but for now let's just log a warning
 	 * about such attempt, as likely we might be doing something wrong.
 	 */
+	if (__ratelimit(&vf_inaccessible_write_rs))
+		xe_gt_sriov_notice(gt,
+				   "VF write to inaccessible reg raw=%#x adj=%#x val=%#x caller=%pS\n",
+				   reg.addr, addr, val, (void *)_RET_IP_);
 	xe_gt_WARN(gt, IS_ENABLED(CONFIG_DRM_XE_DEBUG),
 		   "VF is trying to write %#x to an inaccessible register %#x+%#x\n",
 		   val, reg.addr, addr - reg.addr);
