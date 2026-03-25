@@ -3,23 +3,17 @@
  * Copyright © 2023-2024 Intel Corporation
  */
 
-#include <linux/ratelimit.h>
-
 #include <drm/drm_managed.h>
 
 #include "abi/guc_actions_sriov_abi.h"
 #include "abi/guc_relay_actions_abi.h"
 
-#include "regs/xe_gsc_regs.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_gtt_defs.h"
 #include "regs/xe_guc_regs.h"
 #include "regs/xe_regs.h"
 
-#include "xe_force_wake.h"
-#include "xe_gt.h"
 #include "xe_mmio.h"
-#include "xe_pm.h"
 #include "xe_gt_sriov_printk.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_service.h"
@@ -72,17 +66,8 @@ static const struct xe_reg ver_1270_runtime_regs[] = {
 	GT_VEBOX_VDBOX_DISABLE,		/* _MMIO(0x9140) */
 	XEHP_GT_COMPUTE_DSS_ENABLE,	/* _MMIO(0x9144) */
 	XEHPC_GT_COMPUTE_DSS_ENABLE_EXT,/* _MMIO(0x9148) */
-	XE_REG(0xa26c),			/* CTC_MODE */
 	HUC_KERNEL_LOAD_INFO,		/* _MMIO(0xc1dc) */
-	XE_REG(0x44074),		/* GEN9_TIMESTAMP_OVERRIDE */
-	GU_CNTL_PROTECTED,		/* _MMIO(0x10100C) */
-	HECI_FWSTS5(MTL_GSC_HECI1_BASE),/* _MMIO(0x116c68) */
-	XE_REG(0x138010),		/* MTL_GT_ACTIVITY_FACTOR */
-	XE_REG(0x389140),		/* MTL media runtime */
-	XE_REG(0x38c1dc),		/* media HUC/GSC runtime */
 };
-
-static DEFINE_RATELIMIT_STATE(pf_runtime_snapshot_rs, 2 * HZ, 20);
 
 static const struct xe_reg ver_2000_runtime_regs[] = {
 	RPM_CONFIG0,			/* _MMIO(0x0d00) */
@@ -303,9 +288,7 @@ static void read_many(struct xe_gt *gt, unsigned int count,
 
 static void pf_prepare_runtime_info(struct xe_gt *gt)
 {
-	struct xe_device *xe = gt_to_xe(gt);
 	const struct xe_reg *regs;
-	unsigned int fw_ref = 0;
 	unsigned int size;
 	u32 *values;
 
@@ -316,25 +299,7 @@ static void pf_prepare_runtime_info(struct xe_gt *gt)
 	regs = gt->sriov.pf.service.runtime.regs;
 	values = gt->sriov.pf.service.runtime.values;
 
-	if (xe_gt_is_media_type(gt)) {
-		xe_pm_runtime_get(xe);
-		fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
-		if (__ratelimit(&pf_runtime_snapshot_rs))
-			xe_gt_sriov_notice(gt,
-					   "PF runtime snapshot begin: media forcewake size=%u fw_ref=%#x\n",
-					   size, fw_ref);
-	}
-
 	read_many(gt, size, regs, values);
-
-	if (xe_gt_is_media_type(gt)) {
-		if (__ratelimit(&pf_runtime_snapshot_rs))
-			xe_gt_sriov_notice(gt,
-					   "PF runtime snapshot end: media forcewake size=%u sample=%#x=>%#x\n",
-					   size, regs[0].addr, values[0]);
-		xe_force_wake_put(gt_to_fw(gt), fw_ref);
-		xe_pm_runtime_put(xe);
-	}
 
 	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_SRIOV)) {
 		struct drm_printer p = xe_gt_dbg_printer(gt);
