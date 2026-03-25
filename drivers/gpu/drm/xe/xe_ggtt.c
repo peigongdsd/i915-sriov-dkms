@@ -946,19 +946,37 @@ u64 xe_ggtt_largest_hole(struct xe_ggtt *ggtt, u64 alignment, u64 *spare)
 #ifdef CONFIG_PCI_IOV
 static DEFINE_RATELIMIT_STATE(vf_ggtt_update_rs, 2 * HZ, 40);
 
-static u64 xe_ggtt_vf_addr_mask(void)
-{
-	return GENMASK_ULL(45, 12);
-}
-
-static u64 xe_ggtt_vf_pat_mask(void)
-{
-	return XELPG_GGTT_PTE_PAT0 | XELPG_GGTT_PTE_PAT1;
-}
-
 static u64 xe_encode_vfid_pte(u16 vfid)
 {
 	return FIELD_PREP(GGTT_PTE_VFID, vfid) | XE_PAGE_PRESENT;
+}
+
+static const char *xe_ggtt_vf_update_source_name(enum xe_ggtt_vf_update_source source)
+{
+	switch (source) {
+	case XE_GGTT_VF_UPDATE_SOURCE_RELAY_SERVICE:
+		return "relay";
+	case XE_GGTT_VF_UPDATE_SOURCE_MMIO_RELAY:
+		return "mmio";
+	default:
+		return "unknown";
+	}
+}
+
+static bool xe_ggtt_test_immediate_invalidate(struct xe_ggtt *ggtt)
+{
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+
+	return xe->info.platform == XE_METEORLAKE;
+}
+
+static void xe_ggtt_invalidate_now(struct xe_ggtt *ggtt)
+{
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+
+	xe_pm_runtime_get(xe);
+	xe_ggtt_invalidate(ggtt);
+	xe_pm_runtime_put(xe);
 }
 
 static void xe_ggtt_assign_locked(struct xe_ggtt *ggtt, const struct drm_mm_node *node, u16 vfid)
@@ -1077,9 +1095,9 @@ int xe_ggtt_node_load(struct xe_ggtt_node *node, const void *src, size_t size, u
 
 static u64 xe_ggtt_prepare_vf_pte(u64 pte, u16 vfid)
 {
-	u64 kept = pte & (xe_ggtt_vf_addr_mask() | xe_ggtt_vf_pat_mask());
+	u64 vfid_pte = u64_replace_bits(pte, vfid, GGTT_PTE_VFID);
 
-	return kept | xe_encode_vfid_pte(vfid);
+	return vfid_pte | XE_PAGE_PRESENT;
 }
 
 static u64 xe_ggtt_write_one(struct xe_ggtt *ggtt, u64 addr, u64 pte, u16 vfid)
@@ -1188,16 +1206,18 @@ static void xe_ggtt_shadow_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u
 #endif
 
 int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
-			   u8 mode, u16 num_copies, const u64 *ptes, u16 count)
+			   u8 mode, u16 num_copies, const u64 *ptes, u16 count,
+			   enum xe_ggtt_vf_update_source source)
 {
 	struct xe_ggtt *ggtt;
 	u64 ggtt_addr, ggtt_addr_end, vf_ggtt_end;
-	u64 raw_pattern, kept_pattern, final_pattern, dropped_pattern;
+	u64 log_first_addr, log_last_addr, log_first_pte = 0, log_last_pte = 0;
 	u16 n_ptes;
 	u16 remaining;
 	u16 copies;
 	u16 i;
 	bool duplicated;
+	bool immediate_invalidate;
 
 	if (!node)
 		return -ENOENT;
@@ -1213,12 +1233,10 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	if (ggtt_addr_end > vf_ggtt_end)
 		return -ERANGE;
 
-	raw_pattern = ptes[0];
-	kept_pattern = raw_pattern & (xe_ggtt_vf_addr_mask() | xe_ggtt_vf_pat_mask());
-	final_pattern = xe_ggtt_prepare_vf_pte(raw_pattern, vfid);
-	dropped_pattern = raw_pattern & ~(xe_ggtt_vf_addr_mask() | xe_ggtt_vf_pat_mask());
-
 	n_ptes = num_copies ? num_copies + count : count;
+	immediate_invalidate = xe_ggtt_test_immediate_invalidate(ggtt);
+	log_first_addr = ggtt_addr;
+	log_last_addr = ggtt_addr + (u64)n_ptes * XE_PAGE_SIZE - XE_PAGE_SIZE;
 
 	{
 		guard(mutex)(&ggtt->lock);
@@ -1254,17 +1272,24 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 		xe_ggtt_shadow_update_vf_ptes(node, vfid, pte_offset, mode, num_copies,
 					      ptes, count);
 #endif
+		log_first_pte = ggtt->pt_ops->ggtt_get_pte(ggtt, log_first_addr);
+		log_last_pte = ggtt->pt_ops->ggtt_get_pte(ggtt, log_last_addr);
 	}
 
 	if (__ratelimit(&vf_ggtt_update_rs))
 		xe_tile_notice(ggtt->tile,
-			       "SR-IOV VF%u GGTT PF-update mode=%u copies=%u count=%u off=%#x raw=%#llx kept=%#llx dropped=%#llx final=%#llx addr=%#llx pat=%#llx\n",
-			       vfid, mode, num_copies, count, pte_offset,
-			       raw_pattern, kept_pattern, dropped_pattern, final_pattern,
-			       kept_pattern & xe_ggtt_vf_addr_mask(),
-			       kept_pattern & xe_ggtt_vf_pat_mask());
+			       "SR-IOV VF%u GGTT PF-update src=%s inval=%s mode=%u copies=%u count=%u off=%#x first=%#llx=>%#llx last=%#llx=>%#llx raw0=%#llx\n",
+			       vfid, xe_ggtt_vf_update_source_name(source),
+			       immediate_invalidate ? "immediate" : "deferred",
+			       mode, num_copies, count, pte_offset,
+			       log_first_addr, log_first_pte,
+			       log_last_addr, log_last_pte,
+			       ptes[0]);
 
-	xe_ggtt_invalidate_deferred(ggtt);
+	if (immediate_invalidate)
+		xe_ggtt_invalidate_now(ggtt);
+	else
+		xe_ggtt_invalidate_deferred(ggtt);
 	return n_ptes;
 }
 

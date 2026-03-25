@@ -1690,7 +1690,8 @@ static int mmio_relay_reply_update_ggtt(struct xe_guc *guc, struct xe_gt *gt,
 	pte = ((u64)pte_hi << 32) | pte_lo;
 	node = gt->sriov.pf.vfs[vfid].config.ggtt_region;
 
-	ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode, num_copies, &pte, 1);
+	ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode, num_copies, &pte, 1,
+				     XE_GGTT_VF_UPDATE_SOURCE_MMIO_RELAY);
 	if (ret < 0)
 		return ret;
 
