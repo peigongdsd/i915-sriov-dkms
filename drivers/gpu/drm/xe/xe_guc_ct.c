@@ -29,6 +29,7 @@
 #include "xe_gt_sriov_pf_control.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_monitor.h"
+#include "xe_gt_sriov_printk.h"
 #include "xe_gt_sriov_pf_service_types.h"
 #include "xe_ggtt.h"
 #include "xe_guc.h"
@@ -1557,6 +1558,9 @@ static void relay_trace_set_bit(u64 full[4], u32 bit)
 	full[idx] |= BIT_ULL(off);
 }
 
+static DEFINE_RATELIMIT_STATE(mmio_relay_path_rs, 2 * HZ, 80);
+static DEFINE_RATELIMIT_STATE(mmio_relay_runtime_rs, 2 * HZ, 120);
+
 static void mmio_relay_trace_update(struct xe_gt *gt, u32 vfid, u32 opcode,
 				    u32 magic, const u32 *msg)
 {
@@ -1635,13 +1639,26 @@ static int mmio_relay_reply_get_runtime(struct xe_guc *guc, struct xe_gt *gt,
 		for (j = 0; j < runtime->size; j++) {
 			if (mmio_relay_runtime_match(gt, offset, runtime->regs[j].addr)) {
 				data[i + 1] = runtime->values[j];
+				if (__ratelimit(&mmio_relay_runtime_rs))
+					xe_gt_sriov_notice(gt,
+							   "MMIO runtime VF%u req=%#x hit reg=%#x adj=%#x val=%#x idx=%u\n",
+							   vfid, offset,
+							   runtime->regs[j].addr,
+							   xe_mmio_adjusted_addr(&gt->mmio,
+									 runtime->regs[j].addr),
+							   runtime->values[j], j);
 				found = true;
 				break;
 			}
 		}
 
-		if (!found)
+		if (!found) {
+			if (__ratelimit(&mmio_relay_runtime_rs))
+				xe_gt_sriov_notice(gt,
+						   "MMIO runtime VF%u req=%#x miss size=%u magic=%#x\n",
+						   vfid, offset, runtime->size, magic);
 			return -EACCES;
+		}
 	}
 
 	return mmio_relay_send_reply(guc, vfid, magic, data);
@@ -1720,6 +1737,7 @@ static int mmio_relay_reply_handshake(struct xe_guc *guc, u32 vfid, u32 magic,
 static int mmio_relay_process(struct xe_guc *guc, struct xe_gt *gt,
 			      const u32 *msg, u32 len)
 {
+	struct xe_device *xe = gt_to_xe(gt);
 	u32 vfid, magic, opcode;
 	int err = -EPROTO;
 
@@ -1734,6 +1752,19 @@ static int mmio_relay_process(struct xe_guc *guc, struct xe_gt *gt,
 
 	if (unlikely(!vfid))
 		return -EPROTO;
+
+	xe_pm_runtime_get(xe);
+
+	if (__ratelimit(&mmio_relay_path_rs))
+		xe_gt_sriov_notice(gt,
+				   "MMIO relay enter VF%u opcode=%#x magic=%#x active=%u media=%u raw=%#x %#x %#x %#x\n",
+				   vfid, opcode, magic,
+				   !xe_pm_runtime_suspended(xe),
+				   xe_gt_is_media_type(gt),
+				   msg[2],
+				   len > 3 ? msg[3] : 0,
+				   len > 4 ? msg[4] : 0,
+				   len > 5 ? msg[5] : 0);
 
 	mmio_relay_trace_update(gt, vfid, opcode, magic, msg + 2);
 
@@ -1754,6 +1785,14 @@ static int mmio_relay_process(struct xe_guc *guc, struct xe_gt *gt,
 
 	if (unlikely(err < 0))
 		mmio_relay_send_error(guc, vfid, magic, -err);
+
+	if (__ratelimit(&mmio_relay_path_rs))
+		xe_gt_sriov_notice(gt,
+				   "MMIO relay exit VF%u opcode=%#x magic=%#x ret=%d active=%u\n",
+				   vfid, opcode, magic, err,
+				   !xe_pm_runtime_suspended(xe));
+
+	xe_pm_runtime_put(xe);
 
 	return err;
 }
