@@ -8,6 +8,7 @@
 #include <kunit/visibility.h>
 #include <linux/fault-inject.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/ratelimit.h>
 #include <linux/sizes.h>
 
 #include <drm/drm_drv.h>
@@ -943,6 +944,18 @@ u64 xe_ggtt_largest_hole(struct xe_ggtt *ggtt, u64 alignment, u64 *spare)
 }
 
 #ifdef CONFIG_PCI_IOV
+static DEFINE_RATELIMIT_STATE(vf_ggtt_update_rs, 2 * HZ, 40);
+
+static u64 xe_ggtt_vf_addr_mask(void)
+{
+	return GENMASK_ULL(45, 12);
+}
+
+static u64 xe_ggtt_vf_pat_mask(void)
+{
+	return XELPG_GGTT_PTE_PAT0 | XELPG_GGTT_PTE_PAT1;
+}
+
 static u64 xe_encode_vfid_pte(u16 vfid)
 {
 	return FIELD_PREP(GGTT_PTE_VFID, vfid) | XE_PAGE_PRESENT;
@@ -1064,9 +1077,9 @@ int xe_ggtt_node_load(struct xe_ggtt_node *node, const void *src, size_t size, u
 
 static u64 xe_ggtt_prepare_vf_pte(u64 pte, u16 vfid)
 {
-	u64 vfid_pte = u64_replace_bits(pte, vfid, GGTT_PTE_VFID);
+	u64 kept = pte & (xe_ggtt_vf_addr_mask() | xe_ggtt_vf_pat_mask());
 
-	return vfid_pte | XE_PAGE_PRESENT;
+	return kept | xe_encode_vfid_pte(vfid);
 }
 
 static u64 xe_ggtt_write_one(struct xe_ggtt *ggtt, u64 addr, u64 pte, u16 vfid)
@@ -1179,6 +1192,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 {
 	struct xe_ggtt *ggtt;
 	u64 ggtt_addr, ggtt_addr_end, vf_ggtt_end;
+	u64 raw_pattern, kept_pattern, final_pattern, dropped_pattern;
 	u16 n_ptes;
 	u16 remaining;
 	u16 copies;
@@ -1198,6 +1212,11 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	vf_ggtt_end = node->base.start + node->base.size - 1;
 	if (ggtt_addr_end > vf_ggtt_end)
 		return -ERANGE;
+
+	raw_pattern = ptes[0];
+	kept_pattern = raw_pattern & (xe_ggtt_vf_addr_mask() | xe_ggtt_vf_pat_mask());
+	final_pattern = xe_ggtt_prepare_vf_pte(raw_pattern, vfid);
+	dropped_pattern = raw_pattern & ~(xe_ggtt_vf_addr_mask() | xe_ggtt_vf_pat_mask());
 
 	n_ptes = num_copies ? num_copies + count : count;
 
@@ -1236,6 +1255,14 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 					      ptes, count);
 #endif
 	}
+
+	if (__ratelimit(&vf_ggtt_update_rs))
+		xe_tile_notice(ggtt->tile,
+			       "SR-IOV VF%u GGTT PF-update mode=%u copies=%u count=%u off=%#x raw=%#llx kept=%#llx dropped=%#llx final=%#llx addr=%#llx pat=%#llx\n",
+			       vfid, mode, num_copies, count, pte_offset,
+			       raw_pattern, kept_pattern, dropped_pattern, final_pattern,
+			       kept_pattern & xe_ggtt_vf_addr_mask(),
+			       kept_pattern & xe_ggtt_vf_pat_mask());
 
 	xe_ggtt_invalidate_deferred(ggtt);
 	return n_ptes;
