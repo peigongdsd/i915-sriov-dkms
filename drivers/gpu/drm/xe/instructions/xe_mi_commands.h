@@ -41,6 +41,8 @@
 #define   MI_SDI_NUM_QW(x)		(REG_FIELD_PREP(MI_SDI_LEN_DW, 2 * (x) + 3 - 2) | \
 					 REG_BIT(21))
 
+#define MI_UPDATE_GTT			__MI_INSTR(0x23)
+
 #define MI_LOAD_REGISTER_IMM		__MI_INSTR(0x22)
 #define   MI_LRI_LRM_CS_MMIO		REG_BIT(19)
 #define   MI_LRI_MMIO_REMAP_EN		REG_BIT(17)

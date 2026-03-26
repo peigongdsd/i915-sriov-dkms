@@ -790,6 +790,77 @@ static u64 xe_migrate_batch_base(struct xe_migrate *m, bool usm)
 	return usm ? m->usm_batch_base_ofs : m->batch_base_ofs;
 }
 
+int xe_migrate_ggtt_bind(struct xe_migrate *m, u32 ggtt_page_offset,
+			 const u64 *ptes, u32 num_entries)
+{
+	struct xe_gt *gt = m->tile->primary_gt;
+	struct xe_bb *bb;
+	struct xe_sched_job *job;
+	struct dma_fence *fence;
+	u32 remaining = num_entries;
+	u32 offset = ggtt_page_offset;
+	int dwords = 1;
+	int ret = 0;
+
+	if (!num_entries)
+		return 0;
+
+	while (remaining) {
+		u32 chunk = min_t(u32, 511, remaining);
+
+		dwords += 2 + 2 * chunk;
+		remaining -= chunk;
+	}
+
+	bb = xe_bb_new(gt, dwords, false);
+	if (IS_ERR(bb))
+		return PTR_ERR(bb);
+
+	remaining = num_entries;
+	while (remaining) {
+		u32 chunk = min_t(u32, 511, remaining);
+		u32 i;
+
+		bb->cs[bb->len++] = MI_UPDATE_GTT | (2 * chunk);
+		bb->cs[bb->len++] = offset << XE_PTE_SHIFT;
+
+		for (i = 0; i < chunk; i++) {
+			u64 pte = *ptes++;
+
+			bb->cs[bb->len++] = lower_32_bits(pte);
+			bb->cs[bb->len++] = upper_32_bits(pte);
+		}
+
+		offset += chunk;
+		remaining -= chunk;
+	}
+
+	job = xe_bb_create_migration_job(m->q, bb, xe_migrate_batch_base(m, false), 0);
+	if (IS_ERR(job)) {
+		ret = PTR_ERR(job);
+		goto out_bb;
+	}
+
+	mutex_lock(&m->job_mutex);
+	xe_sched_job_arm(job);
+	fence = dma_fence_get(&job->drm.s_fence->finished);
+	xe_sched_job_push(job);
+
+	dma_fence_put(m->fence);
+	m->fence = dma_fence_get(fence);
+	mutex_unlock(&m->job_mutex);
+
+	ret = dma_fence_wait(fence, false);
+	xe_bb_free(bb, fence);
+	dma_fence_put(fence);
+
+	return ret < 0 ? ret : 0;
+
+out_bb:
+	xe_bb_free(bb, NULL);
+	return ret;
+}
+
 static u32 xe_migrate_ccs_copy(struct xe_migrate *m,
 			       struct xe_bb *bb,
 			       u64 src_ofs, bool src_is_indirect,

@@ -160,6 +160,9 @@ struct dma_fence *
 xe_migrate_update_pgtables(struct xe_migrate *m,
 			   struct xe_migrate_pt_update *pt_update);
 
+int xe_migrate_ggtt_bind(struct xe_migrate *m, u32 ggtt_page_offset,
+			 const u64 *ptes, u32 num_entries);
+
 void xe_migrate_wait(struct xe_migrate *m);
 
 #if IS_ENABLED(CONFIG_PROVE_LOCKING)

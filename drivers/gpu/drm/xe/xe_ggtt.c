@@ -30,6 +30,7 @@
 #include "xe_guc.h"
 #include "xe_guc_ct.h"
 #include "xe_map.h"
+#include "xe_migrate.h"
 #include "xe_mmio.h"
 #include "xe_pm.h"
 #include "xe_res_cursor.h"
@@ -1504,6 +1505,7 @@ int xe_ggtt_node_load(struct xe_ggtt_node *node, const void *src, size_t size, u
 static void ggtt_vf_apply_work_func(struct work_struct *work)
 {
 	static DEFINE_RATELIMIT_STATE(mtl_flush_rs, 5 * HZ, 10);
+	static DEFINE_RATELIMIT_STATE(mtl_bind_rs, 5 * HZ, 10);
 	struct xe_ggtt_node *node = container_of(work, typeof(*node), vf_apply_work);
 	struct xe_ggtt *ggtt = node->ggtt;
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
@@ -1512,11 +1514,13 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 	guard(xe_pm_runtime)(xe);
 
 	drm_info_once(&xe->drm,
-		      "xe: MTL SR-IOV GGTT path: PF staged shadow flush active for VF GGTT apply\n");
+		      "xe: MTL SR-IOV GGTT path: PF bind-engine GGTT flush active for VF GGTT apply\n");
 
 	for (;;) {
 		u32 start, end, i;
-		u64 ggtt_addr;
+		u64 *prepared_ptes;
+		u32 num_entries;
+		int err;
 
 		mutex_lock(&ggtt->lock);
 		if (!node->vf_apply_dirty || !node->vf_shadow_ptes ||
@@ -1531,18 +1535,63 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 		node->vf_apply_dirty = false;
 		node->vf_apply_start = 0;
 		node->vf_apply_end = 0;
-
-		ggtt_addr = node->base.start + (u64)start * XE_PAGE_SIZE;
-		for (i = start; i < end; i++, ggtt_addr += XE_PAGE_SIZE)
-			ggtt->pt_ops->ggtt_set_pte(ggtt, ggtt_addr,
-						   xe_ggtt_prepare_vf_pte(node->vf_shadow_ptes[i],
-									 node->vfid));
+		num_entries = end - start;
 		mutex_unlock(&ggtt->lock);
+
+		prepared_ptes = kvmalloc_array(num_entries, sizeof(*prepared_ptes), GFP_KERNEL);
+		if (!prepared_ptes) {
+			xe_gt_err(gt,
+				  "MTL SR-IOV GGTT bind allocation failed for %u entries, falling back to CPU flush\n",
+				  num_entries);
+			mutex_lock(&ggtt->lock);
+			for (i = start; i < end; i++) {
+				u64 ggtt_addr = node->base.start + (u64)i * XE_PAGE_SIZE;
+
+				ggtt->pt_ops->ggtt_set_pte(ggtt, ggtt_addr,
+							   xe_ggtt_prepare_vf_pte(node->vf_shadow_ptes[i],
+										 node->vfid));
+			}
+			mutex_unlock(&ggtt->lock);
+			xe_ggtt_invalidate_deferred(ggtt);
+			continue;
+		}
+
+		mutex_lock(&ggtt->lock);
+		for (i = 0; i < num_entries; i++)
+			prepared_ptes[i] = xe_ggtt_prepare_vf_pte(node->vf_shadow_ptes[start + i],
+								  node->vfid);
+		mutex_unlock(&ggtt->lock);
+
+		err = xe_migrate_ggtt_bind(ggtt->tile->migrate,
+					   (node->base.start >> XE_PTE_SHIFT) + start,
+					   prepared_ptes, num_entries);
+		kvfree(prepared_ptes);
+
+		if (err) {
+			drm_info_once(&xe->drm,
+				      "xe: MTL SR-IOV GGTT path: PF bind-engine flush failed, falling back to CPU flush\n");
+			mutex_lock(&ggtt->lock);
+			for (i = start; i < end; i++) {
+				u64 ggtt_addr = node->base.start + (u64)i * XE_PAGE_SIZE;
+
+				ggtt->pt_ops->ggtt_set_pte(ggtt, ggtt_addr,
+							   xe_ggtt_prepare_vf_pte(node->vf_shadow_ptes[i],
+										 node->vfid));
+			}
+			mutex_unlock(&ggtt->lock);
+			xe_ggtt_invalidate_deferred(ggtt);
+			continue;
+		}
+
+		if (__ratelimit(&mtl_bind_rs))
+			xe_gt_notice(gt,
+				     "MTL SR-IOV GGTT bind off=0x%x n=%u via=copy-engine\n",
+				     start, num_entries);
 
 		if (__ratelimit(&mtl_flush_rs))
 			xe_gt_notice(gt,
-				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=staged-shadow\n",
-				     start, end - start);
+				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=bind-engine\n",
+				     start, num_entries);
 
 		xe_ggtt_invalidate_deferred(ggtt);
 	}
@@ -1592,7 +1641,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 
 	if (mtl_path)
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF stages VF GGTT updates in shadow before raw CPU flush\n");
+			      "xe: MTL SR-IOV GGTT path: PF stages VF GGTT updates in shadow before bind-engine flush\n");
 
 	if (mtl_path && node->vf_shadow_ptes)
 		drm_info_once(&xe->drm,
