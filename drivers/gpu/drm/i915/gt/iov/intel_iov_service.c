@@ -366,6 +366,7 @@ static gen8_pte_t get_pte_from_msg(const u32 *msg, u16 id)
 static int pf_reply_update_ggtt(struct intel_iov *iov, u32 origin,
 				u32 relay_id, const u32 *msg, u32 len)
 {
+	static DEFINE_RATELIMIT_STATE(iov_trace_rs, 5 * HZ, 40);
 	u32 response[VF2PF_UPDATE_GGTT32_RESPONSE_MSG_LEN];
 	u16 num_copies;
 	u8 mode;
@@ -396,6 +397,11 @@ static int pf_reply_update_ggtt(struct intel_iov *iov, u32 origin,
 	start_range = &ptes[0];
 	range_size = 1;
 
+	if (__ratelimit(&iov_trace_rs))
+		gt_notice(iov_to_gt(iov),
+			  "IOV TRACE: relay_update_msg vfid=%u relay=%u off=0x%x mode=%u copies=%u count=%u first=%#llx\n",
+			  origin, relay_id, pte_offset, mode, num_copies, count, ptes[0]);
+
 	for (i = 1; i < count; i++) {
 		ptes[i] = get_pte_from_msg(msg, i);
 
@@ -403,6 +409,12 @@ static int pf_reply_update_ggtt(struct intel_iov *iov, u32 origin,
 		    (ptes[i] & ~GEN12_GGTT_PTE_ADDR_MASK)) {
 			u16 local_num_copies = (VF2PF_UPDATE_GGTT32_IS_LAST_MODE(mode)) ?
 					       0 : num_copies;
+
+			if (__ratelimit(&iov_trace_rs))
+				gt_notice(iov_to_gt(iov),
+					  "IOV TRACE: relay_update_split vfid=%u off=0x%x range=%u local_copies=%u prev=%#llx next=%#llx\n",
+					  origin, pte_offset, range_size, local_num_copies,
+					  ptes[i - 1], ptes[i]);
 
 			ret = intel_iov_ggtt_pf_update_vf_ptes(iov, origin, pte_offset, mode,
 							       local_num_copies, start_range, range_size);
@@ -426,6 +438,11 @@ static int pf_reply_update_ggtt(struct intel_iov *iov, u32 origin,
 		return ret;
 
 	updated += ret;
+
+	if (__ratelimit(&iov_trace_rs))
+		gt_notice(iov_to_gt(iov),
+			  "IOV TRACE: relay_update_done vfid=%u relay=%u updated=%u final_off=0x%x final_range=%u\n",
+			  origin, relay_id, updated, pte_offset, range_size);
 
 	response[0] = FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
 		      FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_RESPONSE_SUCCESS) |
@@ -561,6 +578,7 @@ static int reply_mmio_relay_handshake(struct intel_iov *iov,
 
 static int reply_mmio_relay_update_ggtt(struct intel_iov *iov, u32 vfid, u32 magic, const u32 *msg)
 {
+	static DEFINE_RATELIMIT_STATE(iov_trace_rs, 5 * HZ, 40);
 	u32 data[PF2GUC_MMIO_RELAY_SUCCESS_REQUEST_MSG_NUM_DATA + 1] = { };
 	u16 num_copies;
 	u8 mode;
@@ -582,6 +600,11 @@ static int reply_mmio_relay_update_ggtt(struct intel_iov *iov, u32 vfid, u32 mag
 	pte_hi = FIELD_GET(VF2PF_MMIO_UPDATE_GGTT_REQUEST_MSG_3_PTE_HI, msg[3]);
 
 	pte = make_u64(pte_hi, pte_lo);
+
+	if (__ratelimit(&iov_trace_rs))
+		gt_notice(iov_to_gt(iov),
+			  "IOV TRACE: mmio_update_msg vfid=%u off=0x%x mode=%u copies=%u pte=%#llx\n",
+			  vfid, pte_offset, mode, num_copies, pte);
 
 	ret = intel_iov_ggtt_pf_update_vf_ptes(iov, vfid, pte_offset, mode, num_copies, &pte, 1);
 	if (ret < 0)

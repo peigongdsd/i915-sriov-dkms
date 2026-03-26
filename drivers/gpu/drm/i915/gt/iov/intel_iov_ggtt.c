@@ -51,6 +51,7 @@ sg_add_pte(struct sg_table *st, struct scatterlist *sg, gen8_pte_t source_pte)
 int intel_iov_ggtt_pf_update_vf_ptes(struct intel_iov *iov, u32 vfid, u32 pte_offset, u8 mode,
 				     u16 num_copies, gen8_pte_t *ptes, u16 count)
 {
+	static DEFINE_RATELIMIT_STATE(iov_trace_rs, 5 * HZ, 40);
 	struct drm_mm_node *node = &iov->pf.provisioning.configs[vfid].ggtt_region;
 	u64 ggtt_addr = node->start + pte_offset * I915_GTT_PAGE_SIZE_4K;
 	u64 ggtt_addr_end = ggtt_addr + count * I915_GTT_PAGE_SIZE_4K - 1;
@@ -75,6 +76,12 @@ int intel_iov_ggtt_pf_update_vf_ptes(struct intel_iov *iov, u32 vfid, u32 pte_of
 		return -ERANGE;
 
 	n_ptes = num_copies ? num_copies + count : count;
+
+	if (__ratelimit(&iov_trace_rs))
+		gt_notice(iov_to_gt(iov),
+			  "IOV TRACE: pf_update_vf_ptes vfid=%u off=0x%x mode=%u copies=%u count=%u n=%u addr=%#llx first=%#llx last=%#llx pattern=%#llx\n",
+			  vfid, pte_offset, mode, num_copies, count, n_ptes, ggtt_addr,
+			  ptes[0], ptes[count - 1], pte_pattern);
 
 	st = kmalloc(sizeof(*st), GFP_KERNEL);
 	if (!st)
