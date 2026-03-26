@@ -439,6 +439,10 @@ int intel_iov_ggtt_shadow_save(struct intel_iov *iov, unsigned int vfid, void *b
 
 	ggtt_region = iov->pf.ggtt.shadows_ggtt[vfid].ggtt_region;
 
+	gt_notice(iov_to_gt(iov),
+		  "IOV TRACE: shadow_save vfid=%u base=%#llx size=%#llx req_size=%#zx flags=%#x\n",
+		  vfid, ggtt_region->start, ggtt_region->size, size, flags);
+
 	if (!buf && !size)
 		return ggtt_size_to_ptes_size(ggtt_region->size);
 
@@ -478,6 +482,10 @@ static int pf_ggtt_shadow_restore_ggtt(struct intel_iov *iov, unsigned int vfid)
 	ggtt_region = iov->pf.ggtt.shadows_ggtt[vfid].ggtt_region;
 	size = ggtt_size_to_ptes_size(ggtt_region->size);
 	ggtt_addr = ggtt_region->start;
+
+	gt_notice(iov_to_gt(iov),
+		  "IOV TRACE: shadow_restore_ggtt vfid=%u base=%#llx size=%#zx\n",
+		  vfid, ggtt_addr, size);
 
 	st = kmalloc(sizeof(*st), GFP_KERNEL);
 	if (!st)
@@ -558,6 +566,10 @@ int intel_iov_ggtt_shadow_restore(struct intel_iov *iov, unsigned int vfid, cons
 
 	ggtt_region = iov->pf.ggtt.shadows_ggtt[vfid].ggtt_region;
 
+	gt_notice(iov_to_gt(iov),
+		  "IOV TRACE: shadow_restore vfid=%u base=%#llx region_size=%#llx buf_size=%#zx flags=%#x\n",
+		  vfid, ggtt_region->start, ggtt_region->size, size, flags);
+
 	if (size > ggtt_size_to_ptes_size(ggtt_region->size))
 		return -ENOSPC;
 
@@ -581,6 +593,10 @@ int intel_iov_ggtt_shadow_restore(struct intel_iov *iov, unsigned int vfid, cons
 	}
 
 	err = pf_ggtt_shadow_restore_ggtt(iov, vfid);
+
+	gt_notice(iov_to_gt(iov),
+		  "IOV TRACE: shadow_restore_done vfid=%u ret=%d restored=%#zx\n",
+		  vfid, err, size);
 
 	return err ?: size;
 }

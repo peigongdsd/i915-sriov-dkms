@@ -2114,6 +2114,7 @@ int i915_ggtt_sgtable_update_ptes(struct i915_ggtt *ggtt, unsigned int vfid, u64
 				  const gen8_pte_t pte_pattern)
 {
 	I915_SELFTEST_DECLARE(struct intel_iov_pf_ggtt *iov_ggtt);
+	static DEFINE_RATELIMIT_STATE(iov_trace_rs, 5 * HZ, 20);
 	int ret;
 
 	GEM_BUG_ON(!IS_SRIOV_PF(ggtt->vm.i915));
@@ -2129,6 +2130,13 @@ int i915_ggtt_sgtable_update_ptes(struct i915_ggtt *ggtt, unsigned int vfid, u64
 					  pte_pattern);
 	else
 		ret = sgtable_update_ptes_via_cpu(ggtt, ggtt_addr, st, num_entries, pte_pattern);
+
+	if (__ratelimit(&iov_trace_rs))
+		gt_notice(ggtt->vm.gt,
+			  "IOV TRACE: ggtt_update vfid=%u addr=%#llx n=%u via=%s pattern=%#llx ret=%d\n",
+			  vfid, ggtt_addr, num_entries,
+			  should_update_ggtt_with_bind(ggtt) ? "bind" : "cpu",
+			  pte_pattern, ret);
 
 	if (ret <= 0)
 		goto out;
@@ -2188,6 +2196,10 @@ void i915_ggtt_set_space_owner(struct i915_ggtt *ggtt, u16 vfid,
 	GEM_BUG_ON(!IS_SRIOV_PF(ggtt->vm.i915));
 	GEM_BUG_ON(base % PAGE_SIZE);
 	GEM_BUG_ON(size % PAGE_SIZE);
+
+	gt_notice(ggtt->vm.gt,
+		  "IOV TRACE: set_space_owner vfid=%u base=%#llx size=%#llx via=%s\n",
+		  vfid, base, size, should_update_ggtt_with_bind(ggtt) ? "bind" : "cpu");
 
 	gt_dbg(ggtt->vm.gt, "GGTT VF%u [%#llx-%#llx] %lluK\n",
 	       vfid, base, base + size, size / SZ_1K);
