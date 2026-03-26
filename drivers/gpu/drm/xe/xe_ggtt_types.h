@@ -56,6 +56,12 @@ struct xe_ggtt {
 	struct work_struct invalidate_work;
 	/** @invalidate_pending: Pending invalidate request */
 	atomic_t invalidate_pending;
+	/** @invalidate_requests: Total queued invalidate requests */
+	atomic_t invalidate_requests;
+	/** @invalidate_runs: Total invalidate worker runs */
+	atomic_t invalidate_runs;
+	/** @invalidate_serviced_requests: Requests serviced by completed runs */
+	u32 invalidate_serviced_requests;
 };
 
 /**
