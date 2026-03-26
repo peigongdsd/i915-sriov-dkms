@@ -6,6 +6,7 @@
 #include <drm/drm_debugfs.h>
 #include <drm/drm_managed.h>
 
+#include "xe_device.h"
 #include "xe_gt.h"
 #include "xe_gt_sriov_vf.h"
 #include "xe_guc.h"
@@ -180,7 +181,27 @@ void xe_sriov_vf_init_early(struct xe_device *xe)
  */
 int xe_sriov_vf_init_late(struct xe_device *xe)
 {
-	return xe_sriov_vf_ccs_init(xe);
+	struct xe_tile *tile;
+	struct xe_gt *gt;
+	int err;
+
+	err = xe_sriov_vf_ccs_init(xe);
+	if (err)
+		return err;
+
+	tile = xe_device_get_root_tile(xe);
+	gt = tile ? tile->primary_gt : NULL;
+	if (!gt)
+		return 0;
+
+	err = xe_gt_sriov_vf_notify_bind_ready(gt);
+	if (err) {
+		drm_info_once(&xe->drm,
+			      "xe: MTL SR-IOV GGTT path: VF bind-engine ready notification deferred but failed, keeping PF on CPU apply\n");
+		return 0;
+	}
+
+	return 0;
 }
 
 static int sa_info_vf_ccs(struct seq_file *m, void *data)
