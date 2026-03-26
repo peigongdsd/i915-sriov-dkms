@@ -95,6 +95,8 @@ struct xe_ggtt_node {
 	u32 vf_apply_start;
 	/** @vf_apply_end: Dirty PTE end offset, exclusive */
 	u32 vf_apply_end;
+	/** @vf_bind_ready: Allow MTL/ARL PF bind-engine GGTT flush after relay is active */
+	bool vf_bind_ready;
 #endif
 };
 

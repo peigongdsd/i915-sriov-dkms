@@ -1374,6 +1374,7 @@ static void xe_ggtt_reset_vf_shadow(struct xe_ggtt_node *node)
 	node->vf_apply_queued = false;
 	node->vf_apply_start = 0;
 	node->vf_apply_end = 0;
+	node->vf_bind_ready = false;
 }
 
 static void xe_ggtt_assign_locked(struct xe_ggtt *ggtt, struct xe_ggtt_node *node, u16 vfid)
@@ -1405,6 +1406,26 @@ void xe_ggtt_node_quiesce_vf_apply(struct xe_ggtt_node *node)
 		return;
 
 	cancel_work_sync(&node->vf_apply_work);
+}
+
+void xe_ggtt_node_enable_vf_bind(struct xe_ggtt_node *node)
+{
+	struct xe_ggtt *ggtt;
+	struct xe_device *xe;
+
+	if (!node || !node->vf_shadow_ptes)
+		return;
+
+	ggtt = node->ggtt;
+	xe = tile_to_xe(ggtt->tile);
+
+	mutex_lock(&ggtt->lock);
+	if (!node->vf_bind_ready) {
+		node->vf_bind_ready = true;
+		drm_info_once(&xe->drm,
+			      "xe: MTL SR-IOV GGTT path: PF bind-engine flush armed after VF relay GGTT updates\n");
+	}
+	mutex_unlock(&ggtt->lock);
 }
 
 /**
@@ -1615,6 +1636,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	u16 unchanged = 0;
 	bool duplicated;
 	bool mtl_path;
+	bool bind_path;
 	bool queue_apply = false;
 
 	if (!node)
@@ -1638,6 +1660,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 
 	mtl_path = xe_device_needs_mtl_ggtt_binder(xe) && IS_SRIOV_PF(xe);
 	gt = ggtt->tile->primary_gt ?: ggtt->tile->media_gt;
+	bind_path = mtl_path && node->vf_shadow_ptes && READ_ONCE(node->vf_bind_ready);
 
 	if (mtl_path)
 		drm_info_once(&xe->drm,
@@ -1678,7 +1701,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 					node->vf_shadow_ptes[pte_offset + copies + i] = entry;
 				}
 			}
-			if (!mtl_path || !node->vf_shadow_ptes) {
+			if (!bind_path) {
 				ggtt_addr = xe_ggtt_write_dup_rep(ggtt, ggtt_addr, ptes[0], vfid,
 								  copies, duplicated);
 				for (i = 0; i < remaining; i++)
@@ -1709,7 +1732,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 					node->vf_shadow_ptes[pte_offset + remaining + i] = entry;
 				}
 			}
-			if (!mtl_path || !node->vf_shadow_ptes) {
+			if (!bind_path) {
 				for (i = 0; i < remaining; i++)
 					ggtt_addr = xe_ggtt_write_one(ggtt, ggtt_addr, ptes[i], vfid);
 				ggtt_addr = xe_ggtt_write_dup_rep(ggtt, ggtt_addr, ptes[remaining],
@@ -1720,7 +1743,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 			return -EINVAL;
 		}
 
-		if (mtl_path && node->vf_shadow_ptes) {
+		if (bind_path) {
 			u32 end = pte_offset + n_ptes;
 
 			if (!node->vf_apply_dirty) {
@@ -1744,7 +1767,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 			     "MTL SR-IOV GGTT apply off=0x%x n=%u changed=%u unchanged=%u mode=%u copies=%u\n",
 			     pte_offset, n_ptes, changed, unchanged, mode, num_copies);
 
-	if (mtl_path && node->vf_shadow_ptes && __ratelimit(&mtl_stage_rs))
+	if (bind_path && __ratelimit(&mtl_stage_rs))
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT stage off=0x%x n=%u changed=%u unchanged=%u mode=%u copies=%u\n",
 			     pte_offset, n_ptes, changed, unchanged, mode, num_copies);
@@ -1753,11 +1776,15 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 		drm_info_once(&xe->drm,
 			      "xe: MTL SR-IOV GGTT path: PF shadow observed redundant VF GGTT updates before staged apply\n");
 
-	if (mtl_path && node->vf_shadow_ptes) {
+	if (bind_path) {
 		if (queue_apply)
 			queue_work(ggtt->wq, &node->vf_apply_work);
 		return n_ptes;
 	}
+
+	if (mtl_path && node->vf_shadow_ptes)
+		drm_info_once(&xe->drm,
+			      "xe: MTL SR-IOV GGTT path: PF bootstrap GGTT updates stay on CPU apply until VF relay is active\n");
 
 	xe_ggtt_invalidate_deferred(ggtt);
 	return n_ptes;

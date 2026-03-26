@@ -162,6 +162,8 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 		return -EMSGSIZE;
 
 	node = gt->sriov.pf.vfs[vfid].config.ggtt_region;
+	if (xe_device_needs_mtl_ggtt_binder(gt_to_xe(gt)))
+		xe_ggtt_node_enable_vf_bind(node);
 	ptes[0] = get_pte_from_msg(msg, 0);
 	start_range = &ptes[0];
 	range_size = 1;
