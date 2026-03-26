@@ -162,8 +162,6 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 		return -EMSGSIZE;
 
 	node = gt->sriov.pf.vfs[vfid].config.ggtt_region;
-	if (xe_device_needs_mtl_ggtt_binder(gt_to_xe(gt)))
-		xe_ggtt_node_enable_vf_bind(node);
 	ptes[0] = get_pte_from_msg(msg, 0);
 	start_range = &ptes[0];
 	range_size = 1;
@@ -200,6 +198,41 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 		      FIELD_PREP(VF2PF_UPDATE_GGTT32_RESPONSE_MSG_0_NUM_PTES, updated);
 
 	return VF2PF_UPDATE_GGTT32_RESPONSE_MSG_LEN;
+}
+
+static int pf_process_bind_ready_msg(struct xe_gt *gt, u32 vfid,
+				     const u32 *msg, u32 msg_len,
+				     u32 *response, u32 resp_size)
+{
+	struct xe_ggtt_node *node;
+	u32 mbz;
+
+	if (unlikely(msg_len != VF2PF_NOTIFY_BIND_READY_REQUEST_MSG_LEN))
+		return -EMSGSIZE;
+	if (unlikely(vfid > xe_gt_sriov_pf_get_totalvfs(gt)))
+		return -EINVAL;
+	if (unlikely(gt->info.id != XE_GT0))
+		return -EOPNOTSUPP;
+	if (!xe_sriov_pf_service_is_negotiated(gt_to_xe(gt), vfid, 1, 1))
+		return -EOPNOTSUPP;
+	if (resp_size < VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_LEN)
+		return -ENOBUFS;
+
+	mbz = FIELD_GET(VF2PF_NOTIFY_BIND_READY_REQUEST_MSG_0_MBZ, msg[0]);
+	if (unlikely(mbz))
+		return -EPROTO;
+
+	node = gt->sriov.pf.vfs[vfid].config.ggtt_region;
+	if (!node)
+		return -ENOENT;
+
+	xe_ggtt_node_enable_vf_bind(node);
+
+	response[0] = FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		      FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_RESPONSE_SUCCESS) |
+		      FIELD_PREP(VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_0_MBZ, 0);
+
+	return VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_LEN;
 }
 
 static const struct xe_reg *pick_runtime_regs(struct xe_device *xe, unsigned int *count)
@@ -478,6 +511,9 @@ int xe_gt_sriov_pf_service_process_request(struct xe_gt *gt, u32 origin,
 		break;
 	case GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32:
 		ret = pf_process_update_ggtt_msg(gt, origin, msg, msg_len, response, resp_size);
+		break;
+	case GUC_RELAY_ACTION_VF2PF_NOTIFY_BIND_READY:
+		ret = pf_process_bind_ready_msg(gt, origin, msg, msg_len, response, resp_size);
 		break;
 	default:
 		ret = -EOPNOTSUPP;

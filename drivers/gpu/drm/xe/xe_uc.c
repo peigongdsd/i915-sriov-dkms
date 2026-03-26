@@ -170,6 +170,10 @@ static int vf_uc_load_hw(struct xe_uc *uc)
 	if (err)
 		goto err_out;
 
+	err = xe_gt_sriov_vf_notify_bind_ready(uc_to_gt(uc));
+	if (err)
+		goto err_out;
+
 	return 0;
 
 err_out:

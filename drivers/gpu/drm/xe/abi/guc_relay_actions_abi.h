@@ -15,7 +15,7 @@
  * drivers must support. Currently this is version 1.0.
  *
  * The _`GUC_RELAY_VERSION_LATEST` defines latest VF/PF ABI version that
- * drivers may use. Currently this is version 1.0.
+ * drivers may use. Currently this is version 1.1.
  *
  * Some platforms may require different base VF/PF ABI version.
  * No supported VF/PF ABI version can be 0.0.
@@ -25,7 +25,7 @@
 #define GUC_RELAY_VERSION_BASE_MINOR			0
 
 #define GUC_RELAY_VERSION_LATEST_MAJOR			1
-#define GUC_RELAY_VERSION_LATEST_MINOR			0
+#define GUC_RELAY_VERSION_LATEST_MINOR			1
 
 /**
  * DOC: GuC Relay Actions
@@ -35,6 +35,10 @@
  *  * `VF2PF_HANDSHAKE`_
  *  * `VF2PF_QUERY_RUNTIME`_
  *  * `VF2PF_UPDATE_GGTT32`_
+ *
+ * The following actions are supported from VF/PF ABI version 1.1:
+ *
+ *  * `VF2PF_NOTIFY_BIND_READY`_
  */
 
 /**
@@ -231,6 +235,46 @@
 #define VF2PF_UPDATE_GGTT32_IS_LAST_MODE(_mode) \
 	((_mode) == VF2PF_UPDATE_GGTT32_MODE_DUPLICATE_LAST || \
 	 (_mode) == VF2PF_UPDATE_GGTT32_MODE_REPLICATE_LAST)
+
+/**
+ * DOC: VF2PF_NOTIFY_BIND_READY
+ *
+ * This `Relay Message`_ is used by the VF to notify the PF that the VF main GT
+ * finished its default LRC bring-up and the PF may arm the MTL/ARL bind-engine
+ * GGTT apply path.
+ *
+ * This message definition is supported from ABI version 1.1.
+ *
+ *  +---+-------+--------------------------------------------------------------+
+ *  |   | Bits  | Description                                                  |
+ *  +===+=======+==============================================================+
+ *  | 0 |    31 | ORIGIN = GUC_HXG_ORIGIN_HOST_                                |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 30:28 | TYPE = GUC_HXG_TYPE_REQUEST_                                 |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 27:16 | DATA0 = MBZ                                                  |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   |  15:0 | ACTION = _`GUC_RELAY_ACTION_VF2PF_NOTIFY_BIND_READY`         |
+ *  |   |       |         = 0x0103                                             |
+ *  +---+-------+--------------------------------------------------------------+
+ *
+ *  +---+-------+--------------------------------------------------------------+
+ *  |   | Bits  | Description                                                  |
+ *  +===+=======+==============================================================+
+ *  | 0 |    31 | ORIGIN = GUC_HXG_ORIGIN_HOST_                                |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 30:28 | TYPE = GUC_HXG_TYPE_RESPONSE_SUCCESS_                        |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 27:0  | DATA0 = MBZ                                                  |
+ *  +---+-------+--------------------------------------------------------------+
+ */
+#define GUC_RELAY_ACTION_VF2PF_NOTIFY_BIND_READY	0x0103u
+
+#define VF2PF_NOTIFY_BIND_READY_REQUEST_MSG_LEN		1u
+#define VF2PF_NOTIFY_BIND_READY_REQUEST_MSG_0_MBZ	GUC_HXG_REQUEST_MSG_0_DATA0
+
+#define VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_LEN	1u
+#define VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_0_MBZ	GUC_HXG_RESPONSE_MSG_0_DATA0
 
 /**
  * DOC: GuC Relay Debug Actions

@@ -932,6 +932,51 @@ failed:
 	return err;
 }
 
+/**
+ * xe_gt_sriov_vf_notify_bind_ready - Notify PF that VF main GT finished bring-up.
+ * @gt: the &xe_gt
+ *
+ * This function is for VF use only.
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+int xe_gt_sriov_vf_notify_bind_ready(struct xe_gt *gt)
+{
+	u32 request[VF2PF_NOTIFY_BIND_READY_REQUEST_MSG_LEN] = {
+		FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_REQUEST) |
+		FIELD_PREP(GUC_HXG_REQUEST_MSG_0_ACTION,
+			   GUC_RELAY_ACTION_VF2PF_NOTIFY_BIND_READY),
+	};
+	u32 response[VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_LEN];
+	int ret;
+
+	xe_gt_assert(gt, IS_SRIOV_VF(gt_to_xe(gt)));
+
+	if (gt->info.id != XE_GT0)
+		return 0;
+
+	if (!vf_is_negotiated(gt, 1, 1))
+		return 0;
+
+	ret = xe_guc_relay_send_to_pf(&gt->uc.guc.relay,
+				      request, ARRAY_SIZE(request),
+				      response, ARRAY_SIZE(response));
+	if (unlikely(ret < 0))
+		return ret;
+
+	if (unlikely(ret != VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_LEN))
+		return -EPROTO;
+
+	if (unlikely(FIELD_GET(VF2PF_NOTIFY_BIND_READY_RESPONSE_MSG_0_MBZ, response[0])))
+		return -EPROTO;
+
+	drm_info_once(&gt_to_xe(gt)->drm,
+		      "xe: MTL SR-IOV GGTT path: VF bind-engine ready notification sent after default LRC bring-up\n");
+
+	return 0;
+}
+
 static int vf_runtime_reg_cmp(const void *a, const void *b)
 {
 	const struct vf_runtime_reg *ra = a;

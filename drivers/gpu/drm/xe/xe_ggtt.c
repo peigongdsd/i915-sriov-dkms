@@ -1423,7 +1423,7 @@ void xe_ggtt_node_enable_vf_bind(struct xe_ggtt_node *node)
 	if (!node->vf_bind_ready) {
 		node->vf_bind_ready = true;
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF bind-engine flush armed after VF relay GGTT updates\n");
+			      "xe: MTL SR-IOV GGTT path: PF bind-engine flush armed after VF bind-ready notification\n");
 	}
 	mutex_unlock(&ggtt->lock);
 }
