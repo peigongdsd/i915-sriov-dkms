@@ -35,7 +35,6 @@
 #include "xe_tile_sriov_vf.h"
 #include "xe_tlb_inval.h"
 #include "xe_wa.h"
-#include "xe_gt_sriov_pf_control_types.h"
 #include "xe_wopcm.h"
 #ifdef CONFIG_PCI_IOV
 #include "abi/iov_actions_mmio_abi.h"
@@ -337,9 +336,7 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 		return -ENOMEM;
 	INIT_WORK(&ggtt->invalidate_work, ggtt_invalidate_work_func);
 	atomic_set(&ggtt->invalidate_pending, 0);
-	atomic_set(&ggtt->invalidate_requests, 0);
-	atomic_set(&ggtt->invalidate_runs, 0);
-	ggtt->invalidate_serviced_requests = 0;
+	ggtt->vf_update_seqno = 0;
 
 	__xe_ggtt_init_early(ggtt, xe_wopcm_size(xe));
 
@@ -362,47 +359,6 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 ALLOW_ERROR_INJECTION(xe_ggtt_init_early, ERRNO); /* See xe_pci_probe() */
 
 static void xe_ggtt_invalidate(struct xe_ggtt *ggtt);
-
-static DEFINE_RATELIMIT_STATE(ggtt_invalidate_trace_rs, 2 * HZ, 40);
-
-static bool xe_ggtt_find_flr_wip(struct xe_ggtt *ggtt, unsigned int *vfid, const char **where)
-{
-	struct xe_device *xe = tile_to_xe(ggtt->tile);
-	struct xe_gt *gt;
-	unsigned int num_vfs;
-	unsigned int i;
-
-	if (!IS_SRIOV_PF(xe))
-		return false;
-
-	num_vfs = xe_sriov_pf_num_vfs(xe);
-	if (!num_vfs)
-		return false;
-
-	gt = ggtt->tile->primary_gt;
-	if (gt && gt->sriov.pf.vfs) {
-		for (i = 1; i <= num_vfs; i++) {
-			if (test_bit(XE_GT_SRIOV_STATE_FLR_WIP, gt->sriov.pf.vfs[i].control.state)) {
-				*vfid = i;
-				*where = "primary";
-				return true;
-			}
-		}
-	}
-
-	gt = ggtt->tile->media_gt;
-	if (gt && gt->sriov.pf.vfs) {
-		for (i = 1; i <= num_vfs; i++) {
-			if (test_bit(XE_GT_SRIOV_STATE_FLR_WIP, gt->sriov.pf.vfs[i].control.state)) {
-				*vfid = i;
-				*where = "media";
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
 
 static void xe_ggtt_initial_clear(struct xe_ggtt *ggtt)
 {
@@ -537,62 +493,20 @@ static void ggtt_invalidate_work_func(struct work_struct *work)
 {
 	struct xe_ggtt *ggtt = container_of(work, struct xe_ggtt, invalidate_work);
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
-	u32 request_total = atomic_read(&ggtt->invalidate_requests);
-	u32 batch = request_total - ggtt->invalidate_serviced_requests;
-	u32 run = atomic_inc_return(&ggtt->invalidate_runs);
-	unsigned int flr_vfid = 0;
-	const char *flr_where = "none";
-	bool flr_active = xe_ggtt_find_flr_wip(ggtt, &flr_vfid, &flr_where);
-	bool rerun;
-	s64 start_ns = ktime_get_ns();
-	s64 duration_ns;
 
 	atomic_set(&ggtt->invalidate_pending, 0);
-
-	if (__ratelimit(&ggtt_invalidate_trace_rs))
-		xe_tile_notice(ggtt->tile,
-			       "SR-IOV GGTT invalidate run=%u begin batch=%u req_total=%u serviced=%u flr=%s vf=%u where=%s\n",
-			       run, batch, request_total, ggtt->invalidate_serviced_requests,
-			       flr_active ? "yes" : "no", flr_vfid, flr_where);
 
 	xe_pm_runtime_get(xe);
 	xe_ggtt_invalidate(ggtt);
 	xe_pm_runtime_put(xe);
-	duration_ns = ktime_get_ns() - start_ns;
-	ggtt->invalidate_serviced_requests = request_total;
 
-	flr_vfid = 0;
-	flr_where = "none";
-	flr_active = xe_ggtt_find_flr_wip(ggtt, &flr_vfid, &flr_where);
-	rerun = atomic_xchg(&ggtt->invalidate_pending, 0) == 1;
-
-	if (__ratelimit(&ggtt_invalidate_trace_rs))
-		xe_tile_notice(ggtt->tile,
-			       "SR-IOV GGTT invalidate run=%u end dur_ns=%lld serviced=%u rerun=%s flr=%s vf=%u where=%s\n",
-			       run, duration_ns, ggtt->invalidate_serviced_requests,
-			       rerun ? "yes" : "no",
-			       flr_active ? "yes" : "no", flr_vfid, flr_where);
-
-	if (rerun)
+	if (atomic_xchg(&ggtt->invalidate_pending, 0) == 1)
 		queue_work(ggtt->wq, &ggtt->invalidate_work);
 }
 
 static void xe_ggtt_invalidate_deferred(struct xe_ggtt *ggtt)
 {
-	u32 request_total = atomic_inc_return(&ggtt->invalidate_requests);
-	unsigned int flr_vfid = 0;
-	const char *flr_where = "none";
-	bool flr_active = xe_ggtt_find_flr_wip(ggtt, &flr_vfid, &flr_where);
-	bool queued = atomic_xchg(&ggtt->invalidate_pending, 1) == 0;
-
-	if (__ratelimit(&ggtt_invalidate_trace_rs))
-		xe_tile_notice(ggtt->tile,
-			       "SR-IOV GGTT invalidate queue req=%u queued=%s serviced=%u flr=%s vf=%u where=%s\n",
-			       request_total, queued ? "yes" : "coalesced",
-			       ggtt->invalidate_serviced_requests,
-			       flr_active ? "yes" : "no", flr_vfid, flr_where);
-
-	if (queued)
+	if (atomic_xchg(&ggtt->invalidate_pending, 1) == 0)
 		queue_work(ggtt->wq, &ggtt->invalidate_work);
 }
 
@@ -1053,6 +967,24 @@ static const char *xe_ggtt_vf_update_source_name(enum xe_ggtt_vf_update_source s
 	}
 }
 
+static struct xe_gt_sriov_config *xe_ggtt_get_vf_config(struct xe_ggtt *ggtt, u16 vfid)
+{
+	struct xe_gt *gt = ggtt->tile->primary_gt;
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+
+	if (!IS_SRIOV_PF(xe) || !gt || !gt->sriov.pf.vfs)
+		return NULL;
+	if (!vfid || vfid > xe_sriov_pf_num_vfs(xe))
+		return NULL;
+
+	return &gt->sriov.pf.vfs[vfid].config;
+}
+
+static bool xe_ggtt_ranges_overlap(u64 start_a, u64 end_a, u64 start_b, u64 end_b)
+{
+	return start_a <= end_b && start_b <= end_a;
+}
+
 static void xe_ggtt_assign_locked(struct xe_ggtt *ggtt, const struct drm_mm_node *node, u16 vfid)
 {
 	u64 start = node->start;
@@ -1283,14 +1215,20 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 			   u8 mode, u16 num_copies, const u64 *ptes, u16 count,
 			   enum xe_ggtt_vf_update_source source)
 {
+	struct xe_gt_sriov_config *config;
 	struct xe_ggtt *ggtt;
 	u64 ggtt_addr, ggtt_addr_end, vf_ggtt_end;
 	u64 log_first_addr, log_last_addr, log_first_pte = 0, log_last_pte = 0;
+	u64 seqno = 0, prev_seqno = 0, prev_start = 0, prev_end = 0, now_ns;
 	u16 n_ptes;
 	u16 remaining;
 	u16 copies;
 	u16 i;
+	u16 prev_count = 0, prev_copies = 0;
+	u8 prev_source = 0, prev_mode = 0;
 	bool duplicated;
+	bool overlap = false;
+	s64 delta_ns = -1;
 
 	if (!node)
 		return -ENOENT;
@@ -1306,12 +1244,28 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	if (ggtt_addr_end > vf_ggtt_end)
 		return -ERANGE;
 
+	config = xe_ggtt_get_vf_config(ggtt, vfid);
 	n_ptes = num_copies ? num_copies + count : count;
 	log_first_addr = ggtt_addr;
 	log_last_addr = ggtt_addr + (u64)n_ptes * XE_PAGE_SIZE - XE_PAGE_SIZE;
+	now_ns = ktime_get_ns();
 
 	{
 		guard(mutex)(&ggtt->lock);
+
+		seqno = ++ggtt->vf_update_seqno;
+		if (config && config->ggtt_region == node && config->ggtt_last_update_seqno) {
+			prev_seqno = config->ggtt_last_update_seqno;
+			prev_start = config->ggtt_last_update_start;
+			prev_end = config->ggtt_last_update_end;
+			prev_source = config->ggtt_last_update_source;
+			prev_mode = config->ggtt_last_update_mode;
+			prev_count = config->ggtt_last_update_count;
+			prev_copies = config->ggtt_last_update_copies;
+			overlap = xe_ggtt_ranges_overlap(log_first_addr, log_last_addr,
+							 prev_start, prev_end);
+			delta_ns = now_ns - config->ggtt_last_update_ns;
+		}
 
 		copies = num_copies + 1;
 		remaining = count - 1;
@@ -1346,17 +1300,31 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 #endif
 		log_first_pte = ggtt->pt_ops->ggtt_get_pte(ggtt, log_first_addr);
 		log_last_pte = ggtt->pt_ops->ggtt_get_pte(ggtt, log_last_addr);
+		if (config && config->ggtt_region == node) {
+			config->ggtt_last_update_seqno = seqno;
+			config->ggtt_last_update_ns = now_ns;
+			config->ggtt_last_update_start = log_first_addr;
+			config->ggtt_last_update_end = log_last_addr;
+			config->ggtt_last_update_source = source;
+			config->ggtt_last_update_mode = mode;
+			config->ggtt_last_update_count = count;
+			config->ggtt_last_update_copies = num_copies;
+		}
 	}
 
 	if (__ratelimit(&vf_ggtt_update_rs))
 		xe_tile_notice(ggtt->tile,
-			       "SR-IOV VF%u GGTT PF-update src=%s inval=%s mode=%u copies=%u count=%u off=%#x first=%#llx=>%#llx last=%#llx=>%#llx raw0=%#llx\n",
-			       vfid, xe_ggtt_vf_update_source_name(source),
-			       "deferred",
+			       "SR-IOV VF%u GGTT PF-update seq=%#llx src=%s mode=%u copies=%u count=%u off=%#x range=%#llx-%#llx first=%#llx=>%#llx last=%#llx=>%#llx raw0=%#llx prev_seq=%#llx prev_src=%s prev_mode=%u prev_copies=%u prev_count=%u prev_range=%#llx-%#llx delta_ns=%lld overlap=%s inval=deferred\n",
+			       vfid, seqno, xe_ggtt_vf_update_source_name(source),
 			       mode, num_copies, count, pte_offset,
+			       log_first_addr, log_last_addr,
 			       log_first_addr, log_first_pte,
 			       log_last_addr, log_last_pte,
-			       ptes[0]);
+			       ptes[0], prev_seqno,
+			       prev_seqno ? xe_ggtt_vf_update_source_name(prev_source) : "none",
+			       prev_mode, prev_copies, prev_count,
+			       prev_start, prev_end, delta_ns,
+			       overlap ? "yes" : "no");
 
 	xe_ggtt_invalidate_deferred(ggtt);
 	return n_ptes;

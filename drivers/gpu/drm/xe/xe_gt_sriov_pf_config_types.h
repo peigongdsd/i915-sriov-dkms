@@ -25,6 +25,22 @@ struct xe_gt_sriov_config {
 	u32 ggtt_shadow_num_ptes;
 	/** @ggtt_shadow_updates: Count of shadow updates for this VF. */
 	u64 ggtt_shadow_updates;
+	/** @ggtt_last_update_seqno: Last PF GGTT update sequence for this VF. */
+	u64 ggtt_last_update_seqno;
+	/** @ggtt_last_update_ns: Timestamp of last PF GGTT update for this VF. */
+	u64 ggtt_last_update_ns;
+	/** @ggtt_last_update_start: GGTT start of last PF update for this VF. */
+	u64 ggtt_last_update_start;
+	/** @ggtt_last_update_end: GGTT end of last PF update for this VF. */
+	u64 ggtt_last_update_end;
+	/** @ggtt_last_update_source: Last PF GGTT update source for this VF. */
+	u8 ggtt_last_update_source;
+	/** @ggtt_last_update_mode: Last PF GGTT update mode for this VF. */
+	u8 ggtt_last_update_mode;
+	/** @ggtt_last_update_count: Last PF GGTT update count for this VF. */
+	u16 ggtt_last_update_count;
+	/** @ggtt_last_update_copies: Last PF GGTT update copy count for this VF. */
+	u16 ggtt_last_update_copies;
 	/** @lmem_obj: LMEM allocation for use by the VF. */
 	struct xe_bo *lmem_obj;
 	/** @num_ctxs: number of GuC contexts IDs.  */
