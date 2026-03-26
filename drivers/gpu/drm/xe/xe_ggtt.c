@@ -872,7 +872,7 @@ static void ggtt_invalidate_gt_tlb(struct xe_gt *gt)
 }
 
 #ifdef CONFIG_PCI_IOV
-static int xe_ggtt_pf_bind_queue_init(struct xe_ggtt *ggtt)
+static __maybe_unused int xe_ggtt_pf_bind_queue_init(struct xe_ggtt *ggtt)
 {
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
 	struct xe_exec_queue *q;
@@ -1538,26 +1538,11 @@ void xe_ggtt_node_quiesce_vf_apply(struct xe_ggtt_node *node)
 
 void xe_ggtt_node_enable_vf_bind(struct xe_ggtt_node *node)
 {
-	struct xe_ggtt *ggtt;
-	struct xe_device *xe;
-	int err;
-
 	if (!node || !node->vf_shadow_ptes)
 		return;
 
-	ggtt = node->ggtt;
-	xe = tile_to_xe(ggtt->tile);
-	err = xe_ggtt_pf_bind_queue_init(ggtt);
-	if (err)
-		return;
-
-	mutex_lock(&ggtt->lock);
-	if (!node->vf_bind_ready) {
-		node->vf_bind_ready = true;
-		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF bind-engine flush armed after VF bind-ready notification\n");
-	}
-	mutex_unlock(&ggtt->lock);
+	drm_info_once(&tile_to_xe(node->ggtt->tile)->drm,
+		      "xe: MTL SR-IOV GGTT path: PF bind-ready notification received but bind queue path is disabled; staying on CPU apply\n");
 }
 
 /**
