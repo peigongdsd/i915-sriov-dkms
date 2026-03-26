@@ -14,6 +14,7 @@
 #include "xe_pt_types.h"
 
 struct xe_bo;
+struct xe_exec_queue;
 struct xe_gt;
 
 /**
@@ -59,6 +60,10 @@ struct xe_ggtt {
 #ifdef CONFIG_PCI_IOV
 	/** @vf_relay_ready: use explicit VF->PF relay for steady-state GGTT updates */
 	bool vf_relay_ready;
+	/** @vf_bind_mutex: serialize PF MTL/ARL GGTT bind-queue creation and flush */
+	struct mutex vf_bind_mutex;
+	/** @vf_bind_q: dedicated upstream bind exec queue for PF MTL/ARL GGTT apply */
+	struct xe_exec_queue *vf_bind_q;
 #endif
 };
 

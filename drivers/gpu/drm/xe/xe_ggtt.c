@@ -9,6 +9,7 @@
 #include "xe_ggtt.h"
 
 #include <kunit/visibility.h>
+#include <linux/dma-fence.h>
 #include <linux/fault-inject.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/ratelimit.h>
@@ -19,12 +20,15 @@
 #include <drm/intel/i915_drm.h>
 #include <generated/xe_wa_oob.h>
 
+#include "instructions/xe_mi_commands.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_gtt_defs.h"
 #include "regs/xe_regs.h"
 #include "xe_assert.h"
+#include "xe_bb.h"
 #include "xe_bo.h"
 #include "xe_device.h"
+#include "xe_exec_queue.h"
 #include "xe_gt.h"
 #include "xe_gt_printk.h"
 #include "xe_guc.h"
@@ -34,6 +38,7 @@
 #include "xe_mmio.h"
 #include "xe_pm.h"
 #include "xe_res_cursor.h"
+#include "xe_sched_job.h"
 #include "xe_sriov.h"
 #include "xe_guc_relay.h"
 #include "xe_tile_printk.h"
@@ -580,6 +585,11 @@ struct xe_ggtt *xe_ggtt_alloc(struct xe_tile *tile)
 	if (drmm_mutex_init(&xe->drm, &ggtt->lock))
 		return NULL;
 
+#ifdef CONFIG_PCI_IOV
+	if (drmm_mutex_init(&xe->drm, &ggtt->vf_bind_mutex))
+		return NULL;
+#endif
+
 	primelockdep(ggtt);
 	ggtt->tile = tile;
 
@@ -645,6 +655,14 @@ static void dev_fini_ggtt(void *arg)
 	struct xe_ggtt *ggtt = arg;
 
 	drain_workqueue(ggtt->wq);
+
+#ifdef CONFIG_PCI_IOV
+	mutex_lock(&ggtt->vf_bind_mutex);
+	if (ggtt->vf_bind_q)
+		xe_exec_queue_put(ggtt->vf_bind_q);
+	ggtt->vf_bind_q = NULL;
+	mutex_unlock(&ggtt->vf_bind_mutex);
+#endif
 }
 
 /**
@@ -852,6 +870,116 @@ static void ggtt_invalidate_gt_tlb(struct xe_gt *gt)
 	err = xe_tlb_inval_ggtt(&gt->tlb_inval);
 	xe_gt_WARN(gt, err, "Failed to invalidate GGTT (%pe)", ERR_PTR(err));
 }
+
+#ifdef CONFIG_PCI_IOV
+static int xe_ggtt_pf_bind_queue_init(struct xe_ggtt *ggtt)
+{
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+	struct xe_exec_queue *q;
+	u32 flags;
+
+	if (!xe_device_needs_mtl_ggtt_binder(xe) || IS_SRIOV_VF(xe))
+		return -EOPNOTSUPP;
+
+	mutex_lock(&ggtt->vf_bind_mutex);
+	if (ggtt->vf_bind_q) {
+		mutex_unlock(&ggtt->vf_bind_mutex);
+		return 0;
+	}
+
+	flags = EXEC_QUEUE_FLAG_KERNEL |
+		EXEC_QUEUE_FLAG_PERMANENT |
+		EXEC_QUEUE_FLAG_MIGRATE;
+	q = xe_exec_queue_create_bind(xe, ggtt->tile, NULL, flags, 0);
+	if (IS_ERR(q)) {
+		drm_info_once(&xe->drm,
+			      "xe: MTL SR-IOV GGTT path: PF dedicated bind queue creation failed, staying on CPU apply\n");
+		mutex_unlock(&ggtt->vf_bind_mutex);
+		return PTR_ERR(q);
+	}
+
+	ggtt->vf_bind_q = q;
+	drm_info_once(&xe->drm,
+		      "xe: MTL SR-IOV GGTT path: PF dedicated bind queue created from upstream xe_exec_queue_create_bind\n");
+	mutex_unlock(&ggtt->vf_bind_mutex);
+
+	return 0;
+}
+
+static int xe_ggtt_pf_bind_queue_flush(struct xe_ggtt *ggtt, u32 ggtt_page_offset,
+				       const u64 *ptes, u32 num_entries)
+{
+	struct xe_exec_queue *q;
+	struct xe_gt *gt = ggtt->tile->primary_gt;
+	struct xe_bb *bb;
+	struct xe_sched_job *job;
+	struct dma_fence *fence;
+	u32 remaining = num_entries;
+	u32 offset = ggtt_page_offset;
+	int dwords = 1;
+	int ret = 0;
+
+	if (!num_entries)
+		return 0;
+
+	while (remaining) {
+		u32 chunk = min_t(u32, 511, remaining);
+
+		dwords += 2 + 2 * chunk;
+		remaining -= chunk;
+	}
+
+	bb = xe_bb_new(gt, dwords, false);
+	if (IS_ERR(bb))
+		return PTR_ERR(bb);
+
+	remaining = num_entries;
+	while (remaining) {
+		u32 chunk = min_t(u32, 511, remaining);
+		u32 i;
+
+		bb->cs[bb->len++] = MI_UPDATE_GTT | (2 * chunk);
+		bb->cs[bb->len++] = offset << XE_PTE_SHIFT;
+
+		for (i = 0; i < chunk; i++) {
+			u64 pte = *ptes++;
+
+			bb->cs[bb->len++] = lower_32_bits(pte);
+			bb->cs[bb->len++] = upper_32_bits(pte);
+		}
+
+		offset += chunk;
+		remaining -= chunk;
+	}
+
+	mutex_lock(&ggtt->vf_bind_mutex);
+	q = ggtt->vf_bind_q;
+	if (!q) {
+		mutex_unlock(&ggtt->vf_bind_mutex);
+		xe_bb_free(bb, NULL);
+		return -ENODEV;
+	}
+
+	job = xe_bb_create_job(q, bb);
+	if (IS_ERR(job)) {
+		ret = PTR_ERR(job);
+		mutex_unlock(&ggtt->vf_bind_mutex);
+		xe_bb_free(bb, NULL);
+		return ret;
+	}
+
+	xe_sched_job_arm(job);
+	fence = dma_fence_get(&job->drm.s_fence->finished);
+	xe_sched_job_push(job);
+	ret = dma_fence_wait(fence, false);
+	mutex_unlock(&ggtt->vf_bind_mutex);
+
+	xe_bb_free(bb, fence);
+	dma_fence_put(fence);
+
+	return ret < 0 ? ret : 0;
+}
+#endif
 
 static void ggtt_invalidate_work_func(struct work_struct *work)
 {
@@ -1412,12 +1540,16 @@ void xe_ggtt_node_enable_vf_bind(struct xe_ggtt_node *node)
 {
 	struct xe_ggtt *ggtt;
 	struct xe_device *xe;
+	int err;
 
 	if (!node || !node->vf_shadow_ptes)
 		return;
 
 	ggtt = node->ggtt;
 	xe = tile_to_xe(ggtt->tile);
+	err = xe_ggtt_pf_bind_queue_init(ggtt);
+	if (err)
+		return;
 
 	mutex_lock(&ggtt->lock);
 	if (!node->vf_bind_ready) {
@@ -1535,7 +1667,7 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 	guard(xe_pm_runtime)(xe);
 
 	drm_info_once(&xe->drm,
-		      "xe: MTL SR-IOV GGTT path: PF bind-engine GGTT flush active for VF GGTT apply\n");
+		      "xe: MTL SR-IOV GGTT path: PF dedicated bind-queue GGTT flush active for VF GGTT apply\n");
 
 	for (;;) {
 		u32 start, end, i;
@@ -1583,14 +1715,14 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 								  node->vfid);
 		mutex_unlock(&ggtt->lock);
 
-		err = xe_migrate_ggtt_bind(ggtt->tile->migrate,
-					   (node->base.start >> XE_PTE_SHIFT) + start,
-					   prepared_ptes, num_entries);
+		err = xe_ggtt_pf_bind_queue_flush(ggtt,
+						  (node->base.start >> XE_PTE_SHIFT) + start,
+						  prepared_ptes, num_entries);
 		kvfree(prepared_ptes);
 
 		if (err) {
 			drm_info_once(&xe->drm,
-				      "xe: MTL SR-IOV GGTT path: PF bind-engine flush failed, falling back to CPU flush\n");
+				      "xe: MTL SR-IOV GGTT path: PF dedicated bind-queue flush failed, falling back to CPU flush\n");
 			mutex_lock(&ggtt->lock);
 			for (i = start; i < end; i++) {
 				u64 ggtt_addr = node->base.start + (u64)i * XE_PAGE_SIZE;
@@ -1606,12 +1738,12 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 
 		if (__ratelimit(&mtl_bind_rs))
 			xe_gt_notice(gt,
-				     "MTL SR-IOV GGTT bind off=0x%x n=%u via=copy-engine\n",
+				     "MTL SR-IOV GGTT bind off=0x%x n=%u via=dedicated-bind-queue\n",
 				     start, num_entries);
 
 		if (__ratelimit(&mtl_flush_rs))
 			xe_gt_notice(gt,
-				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=bind-engine\n",
+				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=bind-queue\n",
 				     start, num_entries);
 
 		xe_ggtt_invalidate_deferred(ggtt);
