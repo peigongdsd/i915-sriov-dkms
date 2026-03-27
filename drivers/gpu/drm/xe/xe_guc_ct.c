@@ -1627,7 +1627,7 @@ static int mmio_relay_reply_update_ggtt(struct xe_guc *guc, struct xe_gt *gt,
 		drm_info_once(&gt_to_xe(gt)->drm,
 			      "xe: MTL SR-IOV GGTT path: PF literalizes MMIO bootstrap GGTT updates for validation\n");
 
-	if (__ratelimit(&mtl_trace_rs))
+	if (__ratelimit(&mtl_trace_rs) && num_copies)
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT mmio msg vfid=%u off=0x%x mode=%u copies=%u pte=%#llx\n",
 			     vfid, pte_offset, mode, num_copies, pte);

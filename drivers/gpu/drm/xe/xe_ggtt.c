@@ -421,7 +421,8 @@ static int xe_ggtt_vf_flush_ptes_locked(struct xe_ggtt *ggtt)
 	via = xe_ggtt_vf_relay_enabled(ggtt) ? "relay" :
 	      xe_ggtt_vf_mmio_enabled(ggtt) ? "mmio" : "disabled";
 
-	if (__ratelimit(&mtl_vf_send_rs) && gt)
+	if (__ratelimit(&mtl_vf_send_rs) && gt &&
+	    (ggtt->vf_ptes.num_copies || ggtt->vf_ptes.count > 4))
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT vf flush via=%s off=0x%x mode=%u copies=%u count=%u addr=%#llx first=%#llx last=%#llx\n",
 			     via, ggtt->vf_ptes.offset, ggtt->vf_ptes.mode,
@@ -923,7 +924,6 @@ static void xe_ggtt_invalidate_deferred(struct xe_ggtt *ggtt)
 
 static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 {
-	static DEFINE_RATELIMIT_STATE(mtl_inval_rs, 5 * HZ, 10);
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
 
 	/*
@@ -937,9 +937,6 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 	if (xe_ggtt_is_mtl_pf_experiment(ggtt)) {
 		drm_info_once(&xe->drm,
 			      "xe: MTL SR-IOV GGTT path: PF uses GuC-backed synchronous GGTT invalidate for validation\n");
-		if (__ratelimit(&mtl_inval_rs))
-			xe_tile_notice(ggtt->tile,
-				       "MTL SR-IOV GGTT invalidate via=guc-sync\n");
 		ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt);
 		ggtt_invalidate_gt_tlb(ggtt->tile->media_gt);
 		return;
@@ -1669,7 +1666,7 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 		}
 		mutex_unlock(&ggtt->lock);
 
-		if (__ratelimit(&mtl_flush_rs))
+		if (end - start >= 1024 && __ratelimit(&mtl_flush_rs))
 			xe_gt_notice(gt,
 				     "MTL SR-IOV GGTT flush off=0x%x n=%u gen=%u via=staged-shadow\n",
 				     start, end - start, generation);
@@ -1700,6 +1697,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	u16 changed = 0;
 	u16 unchanged = 0;
 	bool duplicated;
+	bool trace_update;
 	bool mtl_path;
 	bool direct_sync_path;
 	bool queue_apply = false;
@@ -1728,6 +1726,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	direct_sync_path = mtl_path && node->vf_shadow_ptes &&
 		xe_sriov_pf_service_is_negotiated(xe, vfid, 1, 0);
 	gt = ggtt->tile->primary_gt ?: ggtt->tile->media_gt;
+	trace_update = num_copies || count > 32;
 
 	if (mtl_path)
 		drm_info_once(&xe->drm,
@@ -1745,7 +1744,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 		drm_info_once(&xe->drm,
 			      "xe: MTL SR-IOV GGTT path: PF verifies GGTT readback after negotiated VF updates\n");
 
-	if (mtl_path && __ratelimit(&mtl_req_rs))
+	if (mtl_path && trace_update && __ratelimit(&mtl_req_rs))
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT req vfid=%u off=0x%x mode=%u copies=%u count=%u n=%u addr=%#llx first=%#llx last=%#llx\n",
 			     vfid, pte_offset, mode, num_copies, count, n_ptes, ggtt_addr,
@@ -1886,12 +1885,12 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 		}
 	}
 
-	if (mtl_path && node->vf_shadow_ptes && __ratelimit(&mtl_shadow_rs))
+	if (mtl_path && trace_update && node->vf_shadow_ptes && __ratelimit(&mtl_shadow_rs))
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT apply off=0x%x n=%u changed=%u unchanged=%u mode=%u copies=%u\n",
 			     pte_offset, n_ptes, changed, unchanged, mode, num_copies);
 
-	if (mtl_path && node->vf_shadow_ptes && __ratelimit(&mtl_stage_rs))
+	if (mtl_path && trace_update && node->vf_shadow_ptes && __ratelimit(&mtl_stage_rs))
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT stage off=0x%x n=%u changed=%u unchanged=%u mode=%u copies=%u\n",
 			     pte_offset, n_ptes, changed, unchanged, mode, num_copies);
@@ -1901,7 +1900,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 			      "xe: MTL SR-IOV GGTT path: PF shadow observed redundant VF GGTT updates before staged apply\n");
 
 	if (direct_sync_path) {
-		if (__ratelimit(&mtl_flush_rs))
+		if (trace_update && __ratelimit(&mtl_flush_rs))
 			xe_gt_notice(gt,
 				     "MTL SR-IOV GGTT flush vfid=%u off=0x%x n=%u via=direct-sync-postabi\n",
 				     vfid, pte_offset, n_ptes);

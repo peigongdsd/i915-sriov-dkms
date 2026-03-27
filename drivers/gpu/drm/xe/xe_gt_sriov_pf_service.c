@@ -167,7 +167,7 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 	start_range = &ptes[0];
 	range_size = 1;
 
-	if (__ratelimit(&mtl_trace_rs))
+	if (__ratelimit(&mtl_trace_rs) && num_copies)
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT relay msg vfid=%u off=0x%x mode=%u copies=%u count=%u first=%#llx\n",
 			     vfid, pte_offset, mode, num_copies, count, ptes[0]);
@@ -178,7 +178,7 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 			u16 local_num_copies = VF2PF_UPDATE_GGTT32_IS_LAST_MODE(mode) ?
 					       0 : num_copies;
 
-			if (__ratelimit(&mtl_trace_rs))
+			if (__ratelimit(&mtl_trace_rs) && local_num_copies)
 				xe_gt_notice(gt,
 					     "MTL SR-IOV GGTT relay split vfid=%u off=0x%x range=%u local_copies=%u prev=%#llx next=%#llx\n",
 					     vfid, pte_offset, range_size, local_num_copies,
@@ -205,7 +205,7 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 
 	updated += ret;
 
-	if (__ratelimit(&mtl_trace_rs))
+	if (__ratelimit(&mtl_trace_rs) && num_copies)
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT relay done vfid=%u updated=%u final_off=0x%x final_range=%u\n",
 			     vfid, updated, pte_offset, range_size);
