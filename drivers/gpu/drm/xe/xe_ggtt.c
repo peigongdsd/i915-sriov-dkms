@@ -936,9 +936,9 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 
 	if (xe_ggtt_is_mtl_pf_experiment(ggtt)) {
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF uses GuC-backed synchronous GGTT invalidate for validation\n");
-		ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt);
-		ggtt_invalidate_gt_tlb(ggtt->tile->media_gt);
+			      "xe: MTL SR-IOV GGTT path: PF uses i915-like direct MMIO GGTT invalidate primitive\n");
+		ggtt_invalidate_gt_tlb_mmio(ggtt->tile->primary_gt);
+		ggtt_invalidate_gt_tlb_mmio(ggtt->tile->media_gt);
 		return;
 	}
 
