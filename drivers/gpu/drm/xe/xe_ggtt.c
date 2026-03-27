@@ -1900,7 +1900,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	if (direct_sync_path) {
 		if (trace_update && __ratelimit(&mtl_flush_rs))
 			xe_gt_notice(gt,
-				     "MTL SR-IOV GGTT flush vfid=%u off=0x%x n=%u via=direct-sync-postabi\n",
+				     "MTL SR-IOV GGTT flush vfid=%u off=0x%x n=%u via=direct-sync-validation\n",
 				     vfid, pte_offset, n_ptes);
 		xe_ggtt_invalidate(ggtt);
 		return n_ptes;
