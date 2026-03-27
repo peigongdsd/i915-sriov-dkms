@@ -326,6 +326,83 @@ static int xe_ggtt_vf_mmio_send_pte(struct xe_ggtt *ggtt, u64 ggtt_addr,
 	return updated == expected ? 0 : -EPROTO;
 }
 
+static int xe_ggtt_vf_flush_ptes_mmio_literal_locked(struct xe_ggtt *ggtt)
+{
+	u32 pte_offset = ggtt->vf_ptes.offset;
+	u16 copies = ggtt->vf_ptes.num_copies + 1;
+	u16 remaining = ggtt->vf_ptes.count - 1;
+	bool duplicated = ggtt->vf_ptes.mode == MMIO_UPDATE_GGTT_MODE_DUPLICATE ||
+			   ggtt->vf_ptes.mode == MMIO_UPDATE_GGTT_MODE_DUPLICATE_LAST;
+	u64 entry;
+	u64 ggtt_addr;
+	u64 vf_base = xe_tile_sriov_vf_ggtt_base(ggtt->tile);
+	u16 i;
+	int ret;
+
+	if (!ggtt->vf_ptes.count)
+		return 0;
+
+	switch (ggtt->vf_ptes.mode) {
+	case XE_VF_UPDATE_GGTT_MODE_INVALID:
+		if (XE_WARN_ON(ggtt->vf_ptes.count != 1 || ggtt->vf_ptes.num_copies))
+			return -EINVAL;
+		ggtt_addr = vf_base + (u64)pte_offset * XE_PAGE_SIZE;
+		ret = xe_ggtt_vf_mmio_send_pte(ggtt, ggtt_addr,
+					       MMIO_UPDATE_GGTT_MODE_DUPLICATE, 0,
+					       ggtt->vf_ptes.ptes[0]);
+		break;
+	case MMIO_UPDATE_GGTT_MODE_DUPLICATE:
+	case MMIO_UPDATE_GGTT_MODE_REPLICATE:
+		ggtt_addr = vf_base + (u64)pte_offset * XE_PAGE_SIZE;
+		for (i = 0; i < copies; i++, ggtt_addr += XE_PAGE_SIZE) {
+			entry = duplicated ? ggtt->vf_ptes.ptes[0] :
+				ggtt->vf_ptes.ptes[0] + (u64)i * XE_PAGE_SIZE;
+			ret = xe_ggtt_vf_mmio_send_pte(ggtt, ggtt_addr,
+						       MMIO_UPDATE_GGTT_MODE_DUPLICATE, 0,
+						       entry);
+			if (ret)
+				return ret;
+		}
+		for (i = 0; i < remaining; i++, ggtt_addr += XE_PAGE_SIZE) {
+			ret = xe_ggtt_vf_mmio_send_pte(ggtt, ggtt_addr,
+						       MMIO_UPDATE_GGTT_MODE_DUPLICATE, 0,
+						       ggtt->vf_ptes.ptes[i + 1]);
+			if (ret)
+				return ret;
+		}
+		ret = 0;
+		break;
+	case MMIO_UPDATE_GGTT_MODE_DUPLICATE_LAST:
+	case MMIO_UPDATE_GGTT_MODE_REPLICATE_LAST:
+		ggtt_addr = vf_base + (u64)pte_offset * XE_PAGE_SIZE;
+		for (i = 0; i < remaining; i++, ggtt_addr += XE_PAGE_SIZE) {
+			ret = xe_ggtt_vf_mmio_send_pte(ggtt, ggtt_addr,
+						       MMIO_UPDATE_GGTT_MODE_DUPLICATE, 0,
+						       ggtt->vf_ptes.ptes[i]);
+			if (ret)
+				return ret;
+		}
+		for (i = 0; i < copies; i++, ggtt_addr += XE_PAGE_SIZE) {
+			entry = duplicated ? ggtt->vf_ptes.ptes[remaining] :
+				ggtt->vf_ptes.ptes[remaining] + (u64)i * XE_PAGE_SIZE;
+			ret = xe_ggtt_vf_mmio_send_pte(ggtt, ggtt_addr,
+						       MMIO_UPDATE_GGTT_MODE_DUPLICATE, 0,
+						       entry);
+			if (ret)
+				return ret;
+		}
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ggtt->vf_ptes.count = 0;
+	ggtt->vf_ptes.num_copies = 0;
+	ggtt->vf_ptes.mode = XE_VF_UPDATE_GGTT_MODE_INVALID;
+
+	return ret;
+}
+
 static bool xe_ggtt_pte_duplicatable(u64 prev_pte, u64 pte)
 {
 	return prev_pte == pte;
@@ -428,6 +505,9 @@ static int xe_ggtt_vf_flush_ptes_locked(struct xe_ggtt *ggtt)
 			     ggtt->vf_ptes.num_copies, ggtt->vf_ptes.count, ggtt_addr,
 			     ggtt->vf_ptes.ptes[0], ggtt->vf_ptes.ptes[ggtt->vf_ptes.count - 1]);
 
+	if (xe_ggtt_vf_mmio_enabled(ggtt))
+		return xe_ggtt_vf_flush_ptes_mmio_literal_locked(ggtt);
+
 	ret = xe_ggtt_vf_explicit_send_ptes(ggtt, ggtt_addr, ggtt->vf_ptes.mode,
 					       ggtt->vf_ptes.num_copies, ggtt->vf_ptes.ptes,
 					       ggtt->vf_ptes.count);
@@ -464,6 +544,25 @@ static int xe_ggtt_vf_update_pte(struct xe_ggtt *ggtt, u64 ggtt_addr, u64 pte)
 		return -ERANGE;
 
 	pte_offset = (ggtt_addr - vf_base) >> XE_PTE_SHIFT;
+
+	if (xe_ggtt_vf_mmio_enabled(ggtt)) {
+		mutex_lock(&ggtt->vf_ptes.lock);
+
+		ret = xe_ggtt_vf_flush_ptes_mmio_literal_locked(ggtt);
+		if (ret)
+			goto out_unlock_mmio;
+
+		ggtt->vf_ptes.offset = pte_offset;
+		ggtt->vf_ptes.ptes[0] = pte;
+		ggtt->vf_ptes.count = 1;
+		ggtt->vf_ptes.num_copies = 0;
+		ggtt->vf_ptes.mode = MMIO_UPDATE_GGTT_MODE_DUPLICATE;
+
+		ret = xe_ggtt_vf_flush_ptes_mmio_literal_locked(ggtt);
+out_unlock_mmio:
+		mutex_unlock(&ggtt->vf_ptes.lock);
+		return ret;
+	}
 
 	if (xe_guc_ct_enabled(&xe_ggtt_vf_relay_gt(ggtt)->uc.guc.ct))
 		max_ptes = VF2PF_UPDATE_GGTT_MAX_PTES;
