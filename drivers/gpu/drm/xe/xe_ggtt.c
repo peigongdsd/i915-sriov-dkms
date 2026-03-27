@@ -936,12 +936,12 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 
 	if (xe_ggtt_is_mtl_pf_experiment(ggtt)) {
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF uses i915-like direct MMIO GGTT invalidate primitive\n");
+			      "xe: MTL SR-IOV GGTT path: PF uses GuC-backed synchronous GGTT invalidate for validation\n");
 		if (__ratelimit(&mtl_inval_rs))
 			xe_tile_notice(ggtt->tile,
-				       "MTL SR-IOV GGTT invalidate via=i915-mmio-direct\n");
-		ggtt_invalidate_gt_tlb_mmio(ggtt->tile->primary_gt);
-		ggtt_invalidate_gt_tlb_mmio(ggtt->tile->media_gt);
+				       "MTL SR-IOV GGTT invalidate via=guc-sync\n");
+		ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt);
+		ggtt_invalidate_gt_tlb(ggtt->tile->media_gt);
 		return;
 	}
 
