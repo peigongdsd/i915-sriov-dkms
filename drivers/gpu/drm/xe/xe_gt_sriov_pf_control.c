@@ -1620,10 +1620,22 @@ static void pf_enter_vf_flr_reset_mmio(struct xe_gt *gt, unsigned int vfid)
 
 static bool pf_exit_vf_flr_reset_mmio(struct xe_gt *gt, unsigned int vfid)
 {
+	unsigned long timeout = pf_get_default_timeout(XE_GT_SRIOV_STATE_FLR_RESET_CONFIG);
+	int err;
+
 	if (!pf_exit_vf_state(gt, vfid, XE_GT_SRIOV_STATE_FLR_RESET_MMIO))
 		return false;
 
 	xe_gt_sriov_pf_sanitize_hw(gt, vfid);
+
+	drm_info_once(&gt_to_xe(gt)->drm,
+		      "xe: MTL SR-IOV FLR path: PF late VF resource sanitize before FLR finish active for validation\n");
+
+	err = xe_gt_sriov_pf_config_sanitize(gt, vfid, timeout);
+	if (err) {
+		pf_enter_vf_flr_failed(gt, vfid);
+		return true;
+	}
 
 	pf_enter_vf_flr_send_finish(gt, vfid);
 	return true;
