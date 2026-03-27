@@ -1594,11 +1594,15 @@ static int mmio_relay_reply_update_ggtt(struct xe_guc *guc, struct xe_gt *gt,
 	static DEFINE_RATELIMIT_STATE(mtl_trace_rs, 5 * HZ, 40);
 	u32 data[PF2GUC_MMIO_RELAY_SUCCESS_REQUEST_MSG_NUM_DATA + 1] = { };
 	u16 num_copies;
+	u16 updated = 0;
+	u16 i;
 	u8 mode;
 	u32 pte_lo, pte_hi;
 	u32 pte_offset;
 	u64 pte;
+	u64 entry;
 	struct xe_ggtt_node *node;
+	bool duplicated;
 	int ret;
 
 	if (unlikely(!msg[0]))
@@ -1619,17 +1623,42 @@ static int mmio_relay_reply_update_ggtt(struct xe_guc *guc, struct xe_gt *gt,
 		drm_info_once(&gt_to_xe(gt)->drm,
 			      "xe: MTL SR-IOV GGTT path: PF MMIO bootstrap GGTT updates active\n");
 
+	if (xe_device_needs_mtl_ggtt_binder(gt_to_xe(gt)))
+		drm_info_once(&gt_to_xe(gt)->drm,
+			      "xe: MTL SR-IOV GGTT path: PF literalizes MMIO bootstrap GGTT updates for validation\n");
+
 	if (__ratelimit(&mtl_trace_rs))
 		xe_gt_notice(gt,
 			     "MTL SR-IOV GGTT mmio msg vfid=%u off=0x%x mode=%u copies=%u pte=%#llx\n",
 			     vfid, pte_offset, mode, num_copies, pte);
 
-	ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode, num_copies,
-				     &pte, 1);
-	if (ret < 0)
-		return ret;
+	if (!xe_device_needs_mtl_ggtt_binder(gt_to_xe(gt))) {
+		ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode, num_copies,
+					     &pte, 1);
+		if (ret < 0)
+			return ret;
 
-	data[0] = FIELD_PREP(VF2PF_MMIO_UPDATE_GGTT_RESPONSE_MSG_1_NUM_PTES, (u16)ret);
+		updated = ret;
+		goto send_reply;
+	}
+
+	duplicated = mode == MMIO_UPDATE_GGTT_MODE_DUPLICATE ||
+		     mode == MMIO_UPDATE_GGTT_MODE_DUPLICATE_LAST;
+
+	for (i = 0; i <= num_copies; i++) {
+		entry = duplicated ? pte : pte + (u64)i * XE_PAGE_SIZE;
+
+		ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset + i,
+					     VF2PF_UPDATE_GGTT32_MODE_DUPLICATE, 0,
+					     &entry, 1);
+		if (ret < 0)
+			return ret;
+
+		updated += ret;
+	}
+
+send_reply:
+	data[0] = FIELD_PREP(VF2PF_MMIO_UPDATE_GGTT_RESPONSE_MSG_1_NUM_PTES, updated);
 
 	return mmio_relay_send_reply(guc, vfid, magic, data);
 }
