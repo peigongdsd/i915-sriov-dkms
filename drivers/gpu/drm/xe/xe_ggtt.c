@@ -37,7 +37,6 @@
 #include "xe_pm.h"
 #include "xe_res_cursor.h"
 #include "xe_sriov.h"
-#include "xe_sriov_pf_service.h"
 #include "xe_guc_relay.h"
 #include "xe_tile_printk.h"
 #include "xe_tile_sriov_vf.h"
@@ -1723,26 +1722,25 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 		return -ERANGE;
 
 	mtl_path = xe_device_needs_mtl_ggtt_binder(xe) && IS_SRIOV_PF(xe);
-	direct_sync_path = mtl_path && node->vf_shadow_ptes &&
-		xe_sriov_pf_service_is_negotiated(xe, vfid, 1, 0);
+	direct_sync_path = mtl_path && node->vf_shadow_ptes;
 	gt = ggtt->tile->primary_gt ?: ggtt->tile->media_gt;
 	trace_update = num_copies || count > 32;
 
-	if (mtl_path)
+	if (mtl_path && !direct_sync_path)
 		drm_info_once(&xe->drm,
 			      "xe: MTL SR-IOV GGTT path: PF stages VF GGTT updates in shadow before raw CPU flush\n");
 
-	if (mtl_path && node->vf_shadow_ptes)
+	if (mtl_path && node->vf_shadow_ptes && !direct_sync_path)
 		drm_info_once(&xe->drm,
 			      "xe: MTL SR-IOV GGTT path: PF shadow tracking active for VF GGTT apply\n");
 
 	if (direct_sync_path)
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF direct synchronous GGTT apply active after VF/PF ABI negotiation\n");
+			      "xe: MTL SR-IOV GGTT path: PF direct synchronous GGTT apply forced for all VF updates during validation\n");
 
 	if (direct_sync_path)
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF verifies GGTT readback after negotiated VF updates\n");
+			      "xe: MTL SR-IOV GGTT path: PF verifies GGTT readback for all VF updates during validation\n");
 
 	if (mtl_path && trace_update && __ratelimit(&mtl_req_rs))
 		xe_gt_notice(gt,
