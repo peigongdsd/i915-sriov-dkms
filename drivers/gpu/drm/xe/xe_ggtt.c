@@ -1346,6 +1346,37 @@ static u64 xe_ggtt_write_one(struct xe_ggtt *ggtt, u64 addr, u64 pte, u16 vfid)
 	return addr + XE_PAGE_SIZE;
 }
 
+static int xe_ggtt_verify_one(struct xe_ggtt *ggtt, struct xe_gt *gt, u64 addr,
+			      u64 pte, u16 vfid, u32 pte_offset, u16 idx,
+			      u8 mode, u16 num_copies)
+{
+	u64 expected = xe_ggtt_prepare_vf_pte(pte, vfid);
+	u64 actual = ggtt->pt_ops->ggtt_get_pte(ggtt, addr);
+
+	if (actual == expected)
+		return 0;
+
+	xe_gt_err(gt,
+		  "MTL SR-IOV GGTT verify failed off=0x%x idx=%u addr=0x%llx mode=%u copies=%u expected=0x%016llx actual=0x%016llx\n",
+		  pte_offset, idx, (unsigned long long)addr, mode, num_copies,
+		  (unsigned long long)expected, (unsigned long long)actual);
+
+	return -EIO;
+}
+
+static int xe_ggtt_write_one_verified(struct xe_ggtt *ggtt, struct xe_gt *gt,
+				      u64 *addr, u64 pte, u16 vfid,
+				      u32 pte_offset, u16 idx, u8 mode,
+				      u16 num_copies)
+{
+	u64 cur = *addr;
+
+	*addr = xe_ggtt_write_one(ggtt, cur, pte, vfid);
+
+	return xe_ggtt_verify_one(ggtt, gt, cur, pte, vfid, pte_offset, idx,
+				  mode, num_copies);
+}
+
 static u64 xe_ggtt_write_dup_rep(struct xe_ggtt *ggtt, u64 addr, u64 pte, u16 vfid,
 				 u16 num_entries, bool duplicated)
 {
@@ -1503,49 +1534,19 @@ int xe_ggtt_node_load(struct xe_ggtt_node *node, const void *src, size_t size, u
 
 static void ggtt_vf_apply_work_func(struct work_struct *work)
 {
-	static DEFINE_RATELIMIT_STATE(mtl_flush_rs, 5 * HZ, 10);
 	struct xe_ggtt_node *node = container_of(work, typeof(*node), vf_apply_work);
 	struct xe_ggtt *ggtt = node->ggtt;
-	struct xe_device *xe = tile_to_xe(ggtt->tile);
 	struct xe_gt *gt = ggtt->tile->primary_gt ?: ggtt->tile->media_gt;
 
-	guard(xe_pm_runtime)(xe);
+	guard(mutex)(&ggtt->lock);
 
-	drm_info_once(&xe->drm,
-		      "xe: MTL SR-IOV GGTT path: PF staged shadow flush active for VF GGTT apply\n");
+	node->vf_apply_dirty = false;
+	node->vf_apply_queued = false;
+	node->vf_apply_start = 0;
+	node->vf_apply_end = 0;
 
-	for (;;) {
-		u32 start, end, i;
-		u64 ggtt_addr;
-
-		mutex_lock(&ggtt->lock);
-		if (!node->vf_apply_dirty || !node->vf_shadow_ptes ||
-		    !xe_ggtt_node_allocated(node)) {
-			node->vf_apply_queued = false;
-			mutex_unlock(&ggtt->lock);
-			break;
-		}
-
-		start = node->vf_apply_start;
-		end = node->vf_apply_end;
-		node->vf_apply_dirty = false;
-		node->vf_apply_start = 0;
-		node->vf_apply_end = 0;
-
-		ggtt_addr = node->base.start + (u64)start * XE_PAGE_SIZE;
-		for (i = start; i < end; i++, ggtt_addr += XE_PAGE_SIZE)
-			ggtt->pt_ops->ggtt_set_pte(ggtt, ggtt_addr,
-						   xe_ggtt_prepare_vf_pte(node->vf_shadow_ptes[i],
-									 node->vfid));
-		mutex_unlock(&ggtt->lock);
-
-		if (__ratelimit(&mtl_flush_rs))
-			xe_gt_notice(gt,
-				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=staged-shadow\n",
-				     start, end - start);
-
-		xe_ggtt_invalidate_deferred(ggtt);
-	}
+	xe_gt_err(gt,
+		  "MTL SR-IOV GGTT staged PF apply worker invoked unexpectedly in direct-sync branch\n");
 }
 
 int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
@@ -1553,6 +1554,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 {
 	static DEFINE_RATELIMIT_STATE(mtl_shadow_rs, 5 * HZ, 10);
 	static DEFINE_RATELIMIT_STATE(mtl_stage_rs, 5 * HZ, 10);
+	static DEFINE_RATELIMIT_STATE(mtl_flush_rs, 5 * HZ, 10);
 	struct xe_ggtt *ggtt;
 	struct xe_device *xe;
 	struct xe_gt *gt;
@@ -1566,7 +1568,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	u16 unchanged = 0;
 	bool duplicated;
 	bool mtl_path;
-	bool queue_apply = false;
+	int err = 0;
 
 	if (!node)
 		return -ENOENT;
@@ -1592,11 +1594,15 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 
 	if (mtl_path)
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF stages VF GGTT updates in shadow before raw CPU flush\n");
+			      "xe: MTL SR-IOV GGTT path: PF applies VF GGTT updates synchronously with direct CPU writes\n");
+
+	if (mtl_path)
+		drm_info_once(&xe->drm,
+			      "xe: MTL SR-IOV GGTT path: PF verifies GGTT readback after each VF update\n");
 
 	if (mtl_path && node->vf_shadow_ptes)
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF shadow tracking active for VF GGTT apply\n");
+			      "xe: MTL SR-IOV GGTT path: PF shadow tracking active alongside direct VF GGTT apply\n");
 
 	{
 		guard(mutex)(&ggtt->lock);
@@ -1629,7 +1635,28 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 					node->vf_shadow_ptes[pte_offset + copies + i] = entry;
 				}
 			}
-			if (!mtl_path || !node->vf_shadow_ptes) {
+			if (mtl_path) {
+				for (i = 0; i < copies; i++) {
+					entry = duplicated ? ptes[0] :
+						ptes[0] + (u64)i * XE_PAGE_SIZE;
+					err = xe_ggtt_write_one_verified(ggtt, gt,
+									 &ggtt_addr, entry,
+									 vfid, pte_offset, i,
+									 mode, num_copies);
+					if (err)
+						return err;
+				}
+				for (i = 0; i < remaining; i++) {
+					entry = ptes[i + 1];
+					err = xe_ggtt_write_one_verified(ggtt, gt,
+									 &ggtt_addr, entry,
+									 vfid, pte_offset,
+									 copies + i, mode,
+									 num_copies);
+					if (err)
+						return err;
+				}
+			} else {
 				ggtt_addr = xe_ggtt_write_dup_rep(ggtt, ggtt_addr, ptes[0], vfid,
 								  copies, duplicated);
 				for (i = 0; i < remaining; i++)
@@ -1660,7 +1687,28 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 					node->vf_shadow_ptes[pte_offset + remaining + i] = entry;
 				}
 			}
-			if (!mtl_path || !node->vf_shadow_ptes) {
+			if (mtl_path) {
+				for (i = 0; i < remaining; i++) {
+					entry = ptes[i];
+					err = xe_ggtt_write_one_verified(ggtt, gt,
+									 &ggtt_addr, entry,
+									 vfid, pte_offset, i,
+									 mode, num_copies);
+					if (err)
+						return err;
+				}
+				for (i = 0; i < copies; i++) {
+					entry = duplicated ? ptes[remaining] :
+						ptes[remaining] + (u64)i * XE_PAGE_SIZE;
+					err = xe_ggtt_write_one_verified(ggtt, gt,
+									 &ggtt_addr, entry,
+									 vfid, pte_offset,
+									 remaining + i, mode,
+									 num_copies);
+					if (err)
+						return err;
+				}
+			} else {
 				for (i = 0; i < remaining; i++)
 					ggtt_addr = xe_ggtt_write_one(ggtt, ggtt_addr, ptes[i], vfid);
 				ggtt_addr = xe_ggtt_write_dup_rep(ggtt, ggtt_addr, ptes[remaining],
@@ -1669,24 +1717,6 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 			break;
 		default:
 			return -EINVAL;
-		}
-
-		if (mtl_path && node->vf_shadow_ptes) {
-			u32 end = pte_offset + n_ptes;
-
-			if (!node->vf_apply_dirty) {
-				node->vf_apply_start = pte_offset;
-				node->vf_apply_end = end;
-				node->vf_apply_dirty = true;
-			} else {
-				node->vf_apply_start = min(node->vf_apply_start, pte_offset);
-				node->vf_apply_end = max(node->vf_apply_end, end);
-			}
-
-			if (!node->vf_apply_queued) {
-				node->vf_apply_queued = true;
-				queue_apply = true;
-			}
 		}
 	}
 
@@ -1702,11 +1732,14 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 
 	if (mtl_path && unchanged)
 		drm_info_once(&xe->drm,
-			      "xe: MTL SR-IOV GGTT path: PF shadow observed redundant VF GGTT updates before staged apply\n");
+			      "xe: MTL SR-IOV GGTT path: PF shadow observed redundant VF GGTT updates before direct apply\n");
 
-	if (mtl_path && node->vf_shadow_ptes) {
-		if (queue_apply)
-			queue_work(ggtt->wq, &node->vf_apply_work);
+	if (mtl_path) {
+		if (__ratelimit(&mtl_flush_rs))
+			xe_gt_notice(gt,
+				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=direct-sync\n",
+				     pte_offset, n_ptes);
+		xe_ggtt_invalidate(ggtt);
 		return n_ptes;
 	}
 

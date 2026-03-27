@@ -79,15 +79,15 @@ struct xe_ggtt_node {
 	/** @invalidate_on_remove: If it needs invalidation upon removal */
 	bool invalidate_on_remove;
 #ifdef CONFIG_PCI_IOV
-	/** @vf_shadow_ptes: MTL-only PF shadow of VF GGTT contents, without VFID bits */
+	/** @vf_shadow_ptes: PF shadow of VF GGTT contents, without VFID bits */
 	u64 *vf_shadow_ptes;
 	/** @vf_shadow_len: Number of PTEs tracked in @vf_shadow_ptes */
 	u32 vf_shadow_len;
 	/** @vfid: VF identifier assigned to this GGTT region */
 	u16 vfid;
-	/** @vf_apply_work: MTL-only staged PF GGTT apply worker */
+	/** @vf_apply_work: reserved work item for VF GGTT apply lifecycle */
 	struct work_struct vf_apply_work;
-	/** @vf_apply_dirty: Whether staged PF GGTT updates are pending */
+	/** @vf_apply_dirty: Whether VF shadow tracking has pending dirty state */
 	bool vf_apply_dirty;
 	/** @vf_apply_queued: Whether @vf_apply_work is queued or running */
 	bool vf_apply_queued;
