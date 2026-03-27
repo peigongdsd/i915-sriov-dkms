@@ -454,9 +454,8 @@ static int xe_ggtt_vf_flush_ptes(struct xe_ggtt *ggtt)
 
 static int xe_ggtt_vf_update_pte(struct xe_ggtt *ggtt, u64 ggtt_addr, u64 pte)
 {
-	u16 max_copies = FIELD_MAX(VF2PF_MMIO_UPDATE_GGTT_REQUEST_MSG_1_NUM_COPIES);
-	u16 max_ptes = MMIO_UPDATE_GGTT_MAX_PTES;
 	u64 vf_base = xe_tile_sriov_vf_ggtt_base(ggtt->tile);
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
 	u32 pte_offset;
 	int ret;
 
@@ -465,92 +464,27 @@ static int xe_ggtt_vf_update_pte(struct xe_ggtt *ggtt, u64 ggtt_addr, u64 pte)
 
 	pte_offset = (ggtt_addr - vf_base) >> XE_PTE_SHIFT;
 
-	if (xe_guc_ct_enabled(&xe_ggtt_vf_relay_gt(ggtt)->uc.guc.ct))
-		max_ptes = VF2PF_UPDATE_GGTT_MAX_PTES;
+	drm_info_once(&xe->drm,
+		      "xe: MTL SR-IOV GGTT path: VF literal-only GGTT updates active for validation\n");
 
 	mutex_lock(&ggtt->vf_ptes.lock);
 
-again:
-	if (!ggtt->vf_ptes.count) {
-		ggtt->vf_ptes.offset = pte_offset;
-		ggtt->vf_ptes.ptes[0] = pte;
-		ggtt->vf_ptes.count = 1;
-		ggtt->vf_ptes.num_copies = 0;
-		ggtt->vf_ptes.mode = XE_VF_UPDATE_GGTT_MODE_INVALID;
-		goto out_unlock;
+	if (ggtt->vf_ptes.count) {
+		ret = xe_ggtt_vf_flush_ptes_locked(ggtt);
+		if (ret)
+			goto out_unlock_ret;
 	}
 
-	if (!xe_ggtt_vf_is_next_ggtt_offset(ggtt, pte_offset) ||
-	    ggtt->vf_ptes.num_copies == max_copies)
-		goto flush;
+	ggtt->vf_ptes.offset = pte_offset;
+	ggtt->vf_ptes.ptes[0] = pte;
+	ggtt->vf_ptes.count = 1;
+	ggtt->vf_ptes.num_copies = 0;
+	ggtt->vf_ptes.mode = MMIO_UPDATE_GGTT_MODE_DUPLICATE;
 
-	if (!ggtt->vf_ptes.num_copies) {
-		if (xe_ggtt_pte_duplicatable(ggtt->vf_ptes.ptes[ggtt->vf_ptes.count - 1], pte)) {
-			ggtt->vf_ptes.mode = ggtt->vf_ptes.count == 1 ?
-				MMIO_UPDATE_GGTT_MODE_DUPLICATE :
-				MMIO_UPDATE_GGTT_MODE_DUPLICATE_LAST;
-			ggtt->vf_ptes.num_copies++;
-			goto out_unlock;
-		}
-
-		if (xe_ggtt_pte_replicable(ggtt->vf_ptes.ptes[ggtt->vf_ptes.count - 1], pte)) {
-			ggtt->vf_ptes.mode = ggtt->vf_ptes.count == 1 ?
-				MMIO_UPDATE_GGTT_MODE_REPLICATE :
-				MMIO_UPDATE_GGTT_MODE_REPLICATE_LAST;
-			ggtt->vf_ptes.num_copies++;
-			goto out_unlock;
-		}
-
-		if (ggtt->vf_ptes.count == max_ptes)
-			goto flush;
-
-		ggtt->vf_ptes.ptes[ggtt->vf_ptes.count++] = pte;
-		goto out_unlock;
-	}
-
-	if (ggtt->vf_ptes.count == 1 &&
-	    ggtt->vf_ptes.mode == MMIO_UPDATE_GGTT_MODE_DUPLICATE &&
-	    xe_ggtt_pte_duplicatable(ggtt->vf_ptes.ptes[0], pte)) {
-		ggtt->vf_ptes.num_copies++;
-		goto out_unlock;
-	}
-
-	if (ggtt->vf_ptes.count == 1 &&
-	    ggtt->vf_ptes.mode == MMIO_UPDATE_GGTT_MODE_REPLICATE &&
-	    xe_ggtt_pte_replicable(ggtt->vf_ptes.ptes[ggtt->vf_ptes.count - 1] +
-				   (u64)ggtt->vf_ptes.num_copies * XE_PAGE_SIZE, pte)) {
-		ggtt->vf_ptes.num_copies++;
-		goto out_unlock;
-	}
-
-	if (ggtt->vf_ptes.mode == MMIO_UPDATE_GGTT_MODE_DUPLICATE_LAST &&
-	    xe_ggtt_pte_duplicatable(ggtt->vf_ptes.ptes[ggtt->vf_ptes.count - 1], pte)) {
-		ggtt->vf_ptes.num_copies++;
-		goto out_unlock;
-	}
-
-	if (ggtt->vf_ptes.mode == MMIO_UPDATE_GGTT_MODE_REPLICATE_LAST &&
-	    xe_ggtt_pte_replicable(ggtt->vf_ptes.ptes[ggtt->vf_ptes.count - 1] +
-				   (u64)ggtt->vf_ptes.num_copies * XE_PAGE_SIZE, pte)) {
-		ggtt->vf_ptes.num_copies++;
-		goto out_unlock;
-	}
-
-	if (ggtt->vf_ptes.mode < MMIO_UPDATE_GGTT_MODE_DUPLICATE_LAST &&
-	    ggtt->vf_ptes.count != max_ptes) {
-		ggtt->vf_ptes.ptes[ggtt->vf_ptes.count++] = pte;
-		goto out_unlock;
-	}
-
-flush:
 	ret = xe_ggtt_vf_flush_ptes_locked(ggtt);
 	if (ret)
 		goto out_unlock_ret;
 
-	goto again;
-
-out_unlock:
-	ret = 0;
 out_unlock_ret:
 	mutex_unlock(&ggtt->vf_ptes.lock);
 	return ret;
