@@ -116,8 +116,12 @@ struct xe_ggtt_node {
 	u32 vf_apply_start;
 	/** @vf_apply_end: Dirty PTE end offset, exclusive */
 	u32 vf_apply_end;
+	/** @vf_shadow_generation: PF shadow epoch, incremented on shadow reset */
+	u32 vf_shadow_generation;
+	/** @vf_apply_generation: Shadow epoch captured for the queued apply */
+	u32 vf_apply_generation;
 #endif
-};
+	};
 
 /**
  * struct xe_ggtt_pt_ops - GGTT Page table operations

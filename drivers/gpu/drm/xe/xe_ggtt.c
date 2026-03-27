@@ -1520,16 +1520,40 @@ static u64 xe_ggtt_write_dup_rep(struct xe_ggtt *ggtt, u64 addr, u64 pte, u16 vf
 	return addr;
 }
 
+static int xe_ggtt_write_shadow_one_verified(struct xe_ggtt *ggtt, struct xe_gt *gt,
+					     u64 *addr, u64 pte, u16 vfid,
+					     u32 pte_offset, u32 idx, u32 n_ptes,
+					     u32 generation)
+{
+	u64 cur = *addr;
+	u64 expected = xe_ggtt_prepare_vf_pte(pte, vfid);
+	u64 actual;
+
+	*addr = xe_ggtt_write_one(ggtt, cur, pte, vfid);
+	actual = ggtt->pt_ops->ggtt_get_pte(ggtt, cur);
+	if (actual == expected)
+		return 0;
+
+	xe_gt_err(gt,
+		  "MTL SR-IOV GGTT staged-shadow verify failed vfid=%u gen=%u off=0x%x idx=%u n=%u addr=0x%llx expected=0x%016llx actual=0x%016llx\n",
+		  vfid, generation, pte_offset, idx, n_ptes, (unsigned long long)cur,
+		  (unsigned long long)expected, (unsigned long long)actual);
+
+	return -EIO;
+}
+
 static void xe_ggtt_reset_vf_shadow(struct xe_ggtt_node *node)
 {
 	if (node->vf_shadow_ptes)
 		memset(node->vf_shadow_ptes, 0,
 		       node->vf_shadow_len * sizeof(*node->vf_shadow_ptes));
 
+	node->vf_shadow_generation++;
 	node->vf_apply_dirty = false;
 	node->vf_apply_queued = false;
 	node->vf_apply_start = 0;
 	node->vf_apply_end = 0;
+	node->vf_apply_generation = node->vf_shadow_generation;
 }
 
 static void xe_ggtt_assign_locked(struct xe_ggtt *ggtt, struct xe_ggtt_node *node, u16 vfid)
@@ -1665,14 +1689,17 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 	struct xe_ggtt *ggtt = node->ggtt;
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
 	struct xe_gt *gt = ggtt->tile->primary_gt ?: ggtt->tile->media_gt;
+	int err = 0;
 
 	guard(xe_pm_runtime)(xe);
 
 	drm_info_once(&xe->drm,
 		      "xe: MTL SR-IOV GGTT path: PF staged shadow flush active for VF GGTT apply\n");
+	drm_info_once(&xe->drm,
+		      "xe: MTL SR-IOV GGTT path: PF staged shadow readback verification active\n");
 
 	for (;;) {
-		u32 start, end, i;
+		u32 start, end, i, generation;
 		u64 ggtt_addr;
 
 		mutex_lock(&ggtt->lock);
@@ -1685,23 +1712,38 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 
 		start = node->vf_apply_start;
 		end = node->vf_apply_end;
+		generation = node->vf_apply_generation;
 		node->vf_apply_dirty = false;
 		node->vf_apply_start = 0;
 		node->vf_apply_end = 0;
 
 		ggtt_addr = node->base.start + (u64)start * XE_PAGE_SIZE;
-		for (i = start; i < end; i++, ggtt_addr += XE_PAGE_SIZE)
-			ggtt->pt_ops->ggtt_set_pte(ggtt, ggtt_addr,
-						   xe_ggtt_prepare_vf_pte(node->vf_shadow_ptes[i],
-									 node->vfid));
+		if (generation != node->vf_shadow_generation)
+			xe_gt_err(gt,
+				  "MTL SR-IOV GGTT staged-shadow generation mismatch vfid=%u queued_gen=%u live_gen=%u off=0x%x n=%u\n",
+				  node->vfid, generation, node->vf_shadow_generation,
+				  start, end - start);
+
+		for (i = start; i < end; i++) {
+			err = xe_ggtt_write_shadow_one_verified(ggtt, gt, &ggtt_addr,
+								node->vf_shadow_ptes[i],
+								node->vfid, start,
+								i - start, end - start,
+								generation);
+			if (err)
+				break;
+		}
 		mutex_unlock(&ggtt->lock);
 
 		if (__ratelimit(&mtl_flush_rs))
 			xe_gt_notice(gt,
-				     "MTL SR-IOV GGTT flush off=0x%x n=%u via=staged-shadow\n",
-				     start, end - start);
+				     "MTL SR-IOV GGTT flush off=0x%x n=%u gen=%u via=staged-shadow\n",
+				     start, end - start, generation);
 
-		xe_ggtt_invalidate_deferred(ggtt);
+		if (err)
+			break;
+
+		xe_ggtt_invalidate(ggtt);
 	}
 }
 
@@ -1897,6 +1939,7 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 				node->vf_apply_start = pte_offset;
 				node->vf_apply_end = end;
 				node->vf_apply_dirty = true;
+				node->vf_apply_generation = node->vf_shadow_generation;
 			} else {
 				node->vf_apply_start = min(node->vf_apply_start, pte_offset);
 				node->vf_apply_end = max(node->vf_apply_end, end);
