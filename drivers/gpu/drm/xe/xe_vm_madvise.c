@@ -149,9 +149,20 @@ static void madvise_pat_index(struct xe_device *xe, struct xe_vm *vm,
 	xe_assert(vm->xe, op->type == DRM_XE_MEM_RANGE_ATTR_PAT);
 
 	for (i = 0; i < num_vmas; i++) {
+		struct xe_bo *bo = vmas[i]->gpuva.gem.obj ?
+			gem_to_xe_bo(vmas[i]->gpuva.gem.obj) : NULL;
+
 		if (vmas[i]->attr.pat_index == op->pat_index.val) {
 			vmas[i]->skip_invalidation = true;
 		} else {
+			if (bo && (bo->flags & XE_BO_FLAG_SCANOUT))
+				drm_info(&xe->drm,
+					 "VAL/mtl-display madvise scanout bo=%p flags=%#x cpu_caching=%u addr=%#llx range=%#llx pat=%u->%u default_pat=%u\n",
+					 bo, bo->flags, bo->cpu_caching,
+					 vmas[i]->gpuva.va.addr, vmas[i]->gpuva.va.range,
+					 vmas[i]->attr.pat_index, op->pat_index.val,
+					 vmas[i]->attr.default_pat_index);
+
 			vmas[i]->skip_invalidation = false;
 			vmas[i]->attr.pat_index = op->pat_index.val;
 		}

@@ -3,6 +3,8 @@
  * Copyright © 2021 Intel Corporation
  */
 
+#include <drm/drm_gem.h>
+#include <drm/drm_gpuvm.h>
 #include <drm/ttm/ttm_bo.h>
 
 #include "i915_vma.h"
@@ -16,7 +18,66 @@
 #include "xe_device.h"
 #include "xe_ggtt.h"
 #include "xe_pm.h"
+#include "xe_vm.h"
 #include "xe_vram_types.h"
+
+static void log_user_scanout_vma_pat_state(struct xe_bo *bo)
+{
+	struct drm_gem_object *obj = &bo->ttm.base;
+	struct xe_device *xe = xe_bo_device(bo);
+	struct drm_gpuvm_bo *vm_bo;
+	unsigned long pat_mask = 0, default_pat_mask = 0;
+	unsigned int vma_count = 0, vm_count = 0, mutated = 0;
+	struct {
+		u64 addr, range;
+		u16 pat, default_pat;
+	} sample[4];
+	unsigned int sample_count = 0;
+
+	xe_bo_assert_held(bo);
+
+	drm_gem_for_each_gpuvm_bo(vm_bo, obj) {
+		struct drm_gpuva *gpuva;
+
+		vm_count++;
+		drm_gpuvm_bo_for_each_va(gpuva, vm_bo) {
+			struct xe_vma *vma = gpuva_to_vma(gpuva);
+
+			vma_count++;
+			if (vma->attr.pat_index < BITS_PER_LONG)
+				pat_mask |= BIT(vma->attr.pat_index);
+			if (vma->attr.default_pat_index < BITS_PER_LONG)
+				default_pat_mask |= BIT(vma->attr.default_pat_index);
+			if (vma->attr.pat_index != vma->attr.default_pat_index)
+				mutated++;
+
+			if (sample_count < ARRAY_SIZE(sample) &&
+			    (vma->attr.pat_index != vma->attr.default_pat_index ||
+			     vma->attr.pat_index != xe->pat.idx[XE_CACHE_NONE])) {
+				sample[sample_count++] = (typeof(sample[0])) {
+					.addr = gpuva->va.addr,
+					.range = gpuva->va.range,
+					.pat = vma->attr.pat_index,
+					.default_pat = vma->attr.default_pat_index,
+				};
+			}
+		}
+	}
+
+	if (hweight_long(pat_mask) <= 1 && !mutated)
+		return;
+
+	drm_info(&xe->drm,
+		 "VAL/mtl-display pin-fb vma-pat-summary bo=%p vm_count=%u vma_count=%u pat_mask=%#lx default_pat_mask=%#lx mutated=%u ggtt_pat=%u\n",
+		 bo, vm_count, vma_count, pat_mask, default_pat_mask, mutated,
+		 xe->pat.idx[XE_CACHE_NONE]);
+
+	for (unsigned int i = 0; i < sample_count; i++)
+		drm_info(&xe->drm,
+			 "VAL/mtl-display pin-fb vma-pat-detail bo=%p addr=%#llx range=%#llx pat=%u default_pat=%u\n",
+			 bo, sample[i].addr, sample[i].range,
+			 sample[i].pat, sample[i].default_pat);
+}
 
 static void
 write_dpt_rotated(struct xe_bo *bo, struct iosys_map *map, u32 *dpt_ofs, u32 bo_ofs,
@@ -446,6 +507,10 @@ int intel_plane_pin_fb(struct intel_plane_state *new_plane_state,
 			 bo, bo->flags, bo->cpu_caching,
 			 xe->pat.idx[XE_CACHE_NONE], alignment,
 			 new_plane_state->view.gtt.type);
+
+	if ((bo->flags & (XE_BO_FLAG_USER | XE_BO_FLAG_SCANOUT)) ==
+	    (XE_BO_FLAG_USER | XE_BO_FLAG_SCANOUT))
+		log_user_scanout_vma_pat_state(bo);
 
 	vma = __xe_pin_fb_vma(intel_fb, &new_plane_state->view.gtt, alignment);
 
