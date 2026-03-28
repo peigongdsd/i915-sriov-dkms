@@ -9,6 +9,7 @@
 #include "abi/guc_relay_actions_abi.h"
 
 #include "regs/xe_gt_regs.h"
+#include "regs/xe_gsc_regs.h"
 #include "regs/xe_gtt_defs.h"
 #include "regs/xe_guc_regs.h"
 #include "regs/xe_regs.h"
@@ -56,6 +57,11 @@ static const struct xe_reg pvc_runtime_regs[] = {
 	HUC_KERNEL_LOAD_INFO,		/* _MMIO(0xc1dc) */
 };
 
+/*
+ * Mirror the old i915 MTL SR-IOV runtime contract as closely as possible.
+ * Intel later extended this list with additional "early runtime" registers
+ * that VFs may read through the PF runtime service.
+ */
 static const struct xe_reg ver_1270_runtime_regs[] = {
 	RPM_CONFIG0,			/* _MMIO(0x0d00) */
 	XEHP_FUSE4,			/* _MMIO(0x9114) */
@@ -66,7 +72,13 @@ static const struct xe_reg ver_1270_runtime_regs[] = {
 	GT_VEBOX_VDBOX_DISABLE,		/* _MMIO(0x9140) */
 	XEHP_GT_COMPUTE_DSS_ENABLE,	/* _MMIO(0x9144) */
 	XEHPC_GT_COMPUTE_DSS_ENABLE_EXT,/* _MMIO(0x9148) */
+	XE_REG(0xa26c),			/* CTC_MODE */
 	HUC_KERNEL_LOAD_INFO,		/* _MMIO(0xc1dc) */
+	XE_REG(0x44074),		/* GEN9_TIMESTAMP_OVERRIDE */
+	GU_CNTL_PROTECTED,		/* _MMIO(0x10100c) */
+	HECI_FWSTS5(MTL_GSC_HECI1_BASE),/* _MMIO(0x116c68) */
+	XE_REG(0x138010),		/* MTL_GT_ACTIVITY_FACTOR */
+	XE_REG(0x389140),		/* old i915 MTL runtime exposure */
 };
 
 static const struct xe_reg ver_2000_runtime_regs[] = {
