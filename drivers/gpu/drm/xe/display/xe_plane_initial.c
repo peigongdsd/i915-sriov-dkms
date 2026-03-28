@@ -231,7 +231,8 @@ intel_find_initial_plane_obj(struct intel_crtc *crtc,
 			   plane_state->uapi.rotation, &plane_state->view);
 
 	vma = intel_fb_pin_to_ggtt(fb, &plane_state->view.gtt,
-				   0, 0, 0, false, &plane_state->flags);
+				   to_intel_framebuffer(fb)->min_alignment,
+				   0, 0, false, &plane_state->flags);
 	if (IS_ERR(vma))
 		goto nofb;
 
