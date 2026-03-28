@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 /* Copyright © 2024 Intel Corporation */
 
+#include <drm/drm_cache.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_print.h>
 
 #include "xe_bo.h"
 #include "intel_bo.h"
@@ -95,6 +97,40 @@ void intel_bo_frontbuffer_put(struct intel_frontbuffer *_front)
 
 void intel_bo_frontbuffer_flush_for_display(struct intel_frontbuffer *front)
 {
+	struct xe_frontbuffer *xe_front =
+		container_of(front, typeof(*xe_front), base);
+	struct drm_gem_object *obj = xe_front->obj;
+	struct xe_bo *bo = gem_to_xe_bo(obj);
+	struct xe_device *xe = to_xe_device(obj->dev);
+	int ret;
+
+	/*
+	 * Keep this experiment narrow: only flush user scanout BOs backed by
+	 * normal system pages. This restores a real display flush hook on xe
+	 * without changing VRAM/stolen paths.
+	 */
+	if (!(bo->flags & XE_BO_FLAG_SCANOUT) ||
+	    !(bo->flags & XE_BO_FLAG_USER) ||
+	    xe_bo_is_vram(bo) ||
+	    xe_bo_is_stolen(bo))
+		return;
+
+	ret = xe_bo_lock(bo, false);
+	if (ret)
+		return;
+
+	if (bo->ttm.ttm &&
+	    ttm_tt_is_populated(bo->ttm.ttm) &&
+	    xe_bo_sg(bo) &&
+	    xe_bo_sg(bo)->sgl &&
+	    sg_page(xe_bo_sg(bo)->sgl)) {
+		drm_clflush_sg(xe_bo_sg(bo));
+		drm_info_once(&xe->drm,
+			      "xe/display: CPU display flush active for sysmem scanout BOs (bo=%p size=%zu)\n",
+			      bo, xe_bo_size(bo));
+	}
+
+	xe_bo_unlock(bo);
 }
 
 void intel_bo_describe(struct seq_file *m, struct drm_gem_object *obj)
