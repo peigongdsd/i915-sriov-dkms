@@ -398,11 +398,21 @@ int xe_sriov_vf_ccs_attach_bo(struct xe_bo *bo)
 	struct xe_sriov_vf_ccs_ctx *ctx;
 	struct xe_tile *tile;
 	struct xe_bb *bb;
+	static int attach_logs;
 	int err = 0;
 
 	xe_assert(xe, IS_VF_CCS_READY(xe));
+	drm_info_once(&xe->drm,
+		      "VAL/vf-ccs path active: VF CCS metadata batches use MI_FLUSH_DW_CCS without LLC flush semantics\n");
 
 	tile = xe_device_get_root_tile(xe);
+	if (attach_logs < 8) {
+		attach_logs++;
+		xe_sriov_info(xe, "VAL/vf-ccs attach bo=%p size=%llu flags=0x%lx mem=%u attach_seq=%d\n",
+			      bo, xe_bo_size(bo), bo->flags,
+			      bo->ttm.resource ? bo->ttm.resource->mem_type : XE_PL_SYSTEM,
+			      attach_logs);
+	}
 
 	for_each_ccs_rw_ctx(ctx_id) {
 		bb = bo->bb_ccs[ctx_id];
@@ -430,11 +440,20 @@ int xe_sriov_vf_ccs_detach_bo(struct xe_bo *bo)
 	struct xe_device *xe = xe_bo_device(bo);
 	enum xe_sriov_vf_ccs_rw_ctxs ctx_id;
 	struct xe_bb *bb;
+	static int detach_logs;
 
 	xe_assert(xe, IS_VF_CCS_READY(xe));
 
 	if (!xe_bo_has_valid_ccs_bb(bo))
 		return 0;
+
+	if (detach_logs < 8) {
+		detach_logs++;
+		xe_sriov_info(xe, "VAL/vf-ccs detach bo=%p size=%llu flags=0x%lx mem=%u detach_seq=%d\n",
+			      bo, xe_bo_size(bo), bo->flags,
+			      bo->ttm.resource ? bo->ttm.resource->mem_type : XE_PL_SYSTEM,
+			      detach_logs);
+	}
 
 	for_each_ccs_rw_ctx(ctx_id) {
 		bb = bo->bb_ccs[ctx_id];

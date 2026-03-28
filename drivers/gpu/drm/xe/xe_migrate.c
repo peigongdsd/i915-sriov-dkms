@@ -1106,7 +1106,16 @@ int xe_migrate_ccs_rw_copy(struct xe_tile *tile, struct xe_exec_queue *q,
 	struct xe_bb *bb = NULL;
 	u64 src_L0, src_L0_ofs;
 	u32 src_L0_pt;
+	static int ccs_rw_logs;
 	int err;
+
+	if (ccs_rw_logs < 8) {
+		ccs_rw_logs++;
+		xe_sriov_info(xe, "VAL/vf-ccs build bo=%p size=%llu rw=%s seq=%d flush_model=MI_FLUSH_DW_CCS\n",
+			      src_bo, xe_bo_size(src_bo),
+			      read_write == XE_SRIOV_VF_CCS_READ_CTX ? "save" : "restore",
+			      ccs_rw_logs);
+	}
 
 	xe_res_first_sg(xe_bo_sg(src_bo), 0, size, &src_it);
 

@@ -1150,6 +1150,9 @@ static int vf_post_migration_fixups(struct xe_gt *gt)
 		return err;
 
 	if (xe_gt_is_main_type(gt))
+		xe_gt_info(gt, "VAL/vf-ccs post-migration fixups: rebasing VF CCS metadata contexts\n");
+
+	if (xe_gt_is_main_type(gt))
 		xe_sriov_vf_ccs_rebase(gt_to_xe(gt));
 
 	xe_gt_sriov_vf_default_lrcs_hwsp_rebase(gt);
