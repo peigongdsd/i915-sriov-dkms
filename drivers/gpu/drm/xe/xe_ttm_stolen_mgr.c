@@ -27,6 +27,9 @@
 #include "xe_vram.h"
 #include "xe_wa.h"
 
+#define MTL_PCODE_STOLEN_ACCESS		XE_REG(0x138914)
+#define STOLEN_ACCESS_ALLOWED		0x1
+
 struct xe_ttm_stolen_mgr {
 	struct xe_ttm_vram_mgr base;
 
@@ -56,6 +59,23 @@ to_stolen_mgr(struct ttm_resource_manager *man)
 bool xe_ttm_stolen_cpu_access_needs_ggtt(struct xe_device *xe)
 {
 	return GRAPHICS_VERx100(xe) < 1270 && !IS_DGFX(xe);
+}
+
+static bool xe_ttm_stolen_direct_dsm_access_allowed(struct xe_device *xe)
+{
+	if (IS_DGFX(xe) || IS_SRIOV_VF(xe))
+		return false;
+
+	if (xe->info.platform != XE_METEORLAKE)
+		return false;
+
+	/*
+	 * Mirror the i915 MTL policy as closely as possible here:
+	 * direct CPU access to stolen is preferred over BAR2 only if the
+	 * firmware explicitly relaxed access permissions.
+	 */
+	return xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS) ==
+	       STOLEN_ACCESS_ALLOWED;
 }
 
 static u32 get_wopcm_size(struct xe_device *xe)
@@ -127,6 +147,7 @@ static u32 detect_bar2_integrated(struct xe_device *xe, struct xe_ttm_stolen_mgr
 	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
 	struct xe_gt *media_gt = xe_device_get_root_tile(xe)->media_gt;
 	u32 stolen_size, wopcm_size;
+	bool direct_dsm_access;
 	u32 ggc, gms;
 
 	ggc = xe_mmio_read32(xe_root_tile_mmio(xe), GGC);
@@ -146,7 +167,17 @@ static u32 detect_bar2_integrated(struct xe_device *xe, struct xe_ttm_stolen_mgr
 	 * DSMBASE = GSMBASE + 8MB
 	 */
 	mgr->stolen_base = SZ_8M;
-	mgr->io_base = pci_resource_start(pdev, 2) + mgr->stolen_base;
+	direct_dsm_access = xe_ttm_stolen_direct_dsm_access_allowed(xe);
+	if (direct_dsm_access) {
+		mgr->io_base = xe_mmio_read64_2x32(xe_root_tile_mmio(xe), DSMBASE) & BDSM_MASK;
+		drm_info_once(&xe->drm,
+			      "xe: MTL stolen path: using direct DSMBASE CPU access instead of BAR2\n");
+	} else {
+		mgr->io_base = pci_resource_start(pdev, 2) + mgr->stolen_base;
+		if (xe->info.platform == XE_METEORLAKE)
+			drm_info_once(&xe->drm,
+				      "xe: MTL stolen path: direct DSMBASE access unavailable, using BAR2\n");
+	}
 
 	/* return valid GMS value, -EIO if invalid */
 	gms = REG_FIELD_GET(GMS_MASK, ggc);
@@ -189,7 +220,8 @@ static u32 detect_bar2_integrated(struct xe_device *xe, struct xe_ttm_stolen_mgr
 		}
 	}
 
-	if (drm_WARN_ON(&xe->drm, stolen_size + SZ_8M > pci_resource_len(pdev, 2)))
+	if (!direct_dsm_access &&
+	    drm_WARN_ON(&xe->drm, stolen_size + SZ_8M > pci_resource_len(pdev, 2)))
 		return 0;
 
 	return stolen_size;
