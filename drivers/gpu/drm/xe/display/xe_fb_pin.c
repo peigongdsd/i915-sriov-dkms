@@ -427,6 +427,7 @@ int intel_plane_pin_fb(struct intel_plane_state *new_plane_state,
 	struct drm_framebuffer *fb = new_plane_state->hw.fb;
 	struct drm_gem_object *obj = intel_fb_bo(fb);
 	struct xe_bo *bo = gem_to_xe_bo(obj);
+	struct xe_device *xe = to_xe_device(fb->dev);
 	struct i915_vma *vma;
 	struct intel_framebuffer *intel_fb = to_intel_framebuffer(fb);
 	struct intel_plane *plane = to_intel_plane(new_plane_state->uapi.plane);
@@ -437,6 +438,14 @@ int intel_plane_pin_fb(struct intel_plane_state *new_plane_state,
 
 	/* We reject creating !SCANOUT fb's, so this is weird.. */
 	drm_WARN_ON(bo->ttm.base.dev, !(bo->flags & XE_BO_FLAG_SCANOUT));
+
+	if ((bo->flags & (XE_BO_FLAG_USER | XE_BO_FLAG_SCANOUT)) ==
+	    (XE_BO_FLAG_USER | XE_BO_FLAG_SCANOUT))
+		drm_info(&xe->drm,
+			 "VAL/mtl-display pin-fb bo=%p flags=%#x cpu_caching=%u ggtt_pat=%u align=%u view=%u\n",
+			 bo, bo->flags, bo->cpu_caching,
+			 xe->pat.idx[XE_CACHE_NONE], alignment,
+			 new_plane_state->view.gtt.type);
 
 	vma = __xe_pin_fb_vma(intel_fb, &new_plane_state->view.gtt, alignment);
 

@@ -3553,6 +3553,13 @@ static int xe_vm_bind_ioctl_validate_bo(struct xe_device *xe, struct xe_bo *bo,
 		return -EINVAL;
 	}
 
+	if ((bo->flags & XE_BO_FLAG_SCANOUT) &&
+	    pat_index != xe->pat.idx[XE_CACHE_NONE])
+		drm_info(&xe->drm,
+			 "VAL/mtl-display vm-bind scanout bo=%p flags=%#x cpu_caching=%u pat=%u coh=%u op=%u addr=%#llx range=%#llx obj_offset=%#llx\n",
+			 bo, bo->flags, bo->cpu_caching, pat_index, coh_mode,
+			 op, addr, range, obj_offset);
+
 	/* If a BO is protected it can only be mapped if the key is still valid */
 	if ((bind_flags & DRM_XE_VM_BIND_FLAG_CHECK_PXP) && xe_bo_is_protected(bo) &&
 	    op != DRM_XE_VM_BIND_OP_UNMAP && op != DRM_XE_VM_BIND_OP_UNMAP_ALL)

@@ -95,6 +95,15 @@ void intel_bo_frontbuffer_put(struct intel_frontbuffer *_front)
 
 void intel_bo_frontbuffer_flush_for_display(struct intel_frontbuffer *front)
 {
+	struct xe_frontbuffer *xe_front =
+		container_of(front, typeof(*xe_front), base);
+	struct drm_gem_object *obj = xe_front->obj;
+	struct xe_bo *bo = gem_to_xe_bo(obj);
+	struct xe_device *xe = to_xe_device(obj->dev);
+
+	drm_info(&xe->drm,
+		 "VAL/mtl-display no-op frontbuffer flush bo=%p flags=%#x cpu_caching=%u\n",
+		 bo, bo->flags, bo->cpu_caching);
 }
 
 void intel_bo_describe(struct seq_file *m, struct drm_gem_object *obj)

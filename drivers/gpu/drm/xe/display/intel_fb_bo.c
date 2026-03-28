@@ -45,6 +45,11 @@ int intel_fb_bo_framebuffer_init(struct drm_gem_object *obj,
 	if (ret)
 		goto err;
 
+	if ((bo->flags & XE_BO_FLAG_SCANOUT) && xe_bo_is_vm_bound(bo))
+		drm_info(&xe->drm,
+			 "VAL/mtl-display fb-init sees prebound scanout bo=%p flags=%#x cpu_caching=%u\n",
+			 bo, bo->flags, bo->cpu_caching);
+
 	if (!(bo->flags & XE_BO_FLAG_SCANOUT)) {
 		/*
 		 * XE_BO_FLAG_SCANOUT should ideally be set at creation, or is
@@ -53,6 +58,9 @@ int intel_fb_bo_framebuffer_init(struct drm_gem_object *obj,
 		 * coherency with display when unbound.
 		 */
 		if (XE_IOCTL_DBG(xe, xe_bo_is_vm_bound(bo))) {
+			drm_warn(&xe->drm,
+				 "VAL/mtl-display rejecting fb-init for vm-bound non-scanout bo=%p flags=%#x cpu_caching=%u\n",
+				 bo, bo->flags, bo->cpu_caching);
 			ttm_bo_unreserve(&bo->ttm);
 			ret = -EINVAL;
 			goto err;
