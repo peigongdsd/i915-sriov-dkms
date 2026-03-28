@@ -525,8 +525,13 @@ static struct ttm_tt *xe_ttm_tt_create(struct ttm_buffer_object *ttm_bo,
 		 */
 		if ((!bo->cpu_caching && bo->flags & XE_BO_FLAG_SCANOUT) ||
 		    (xe->info.graphics_verx100 >= 1270 &&
-		     bo->flags & XE_BO_FLAG_PAGETABLE))
+		     bo->flags & XE_BO_FLAG_PAGETABLE)) {
 			caching = ttm_write_combined;
+			if (xe->info.platform == XE_METEORLAKE &&
+			    bo->flags & XE_BO_FLAG_PAGETABLE)
+				drm_info_once(&xe->drm,
+					      "xe: MTL page-table path: forcing CPU WC mappings for pagetable BOs\n");
+		}
 	}
 
 	if (bo->flags & XE_BO_FLAG_NEEDS_UC) {
