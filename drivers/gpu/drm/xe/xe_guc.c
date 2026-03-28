@@ -222,6 +222,24 @@ static u32 guc_ctl_wa_flags(struct xe_guc *guc)
 	return flags;
 }
 
+#define VAL_GUC_WA_RCS_CCS_SWITCHOUT BIT(16)
+
+static void guc_log_wa_validation(struct xe_guc *guc)
+{
+	struct xe_device *xe = guc_to_xe(guc);
+	struct xe_gt *gt = guc_to_gt(guc);
+	u32 flags = guc->params[GUC_CTL_WA];
+
+	xe_gt_info(gt,
+		   "VAL/guc-wa flags=0x%08x gfx=%d.%02d hold_ccs_switchout=%u rcs_ccs_switchout=%u pollcs=%u dual_queue=%u wa_14014475959=%u\n",
+		   flags, GRAPHICS_VER(xe), GRAPHICS_VERx100(xe) % 100,
+		   !!(flags & GUC_WA_HOLD_CCS_SWITCHOUT),
+		   !!(flags & VAL_GUC_WA_RCS_CCS_SWITCHOUT),
+		   !!(flags & GUC_WA_POLLCS),
+		   !!(flags & GUC_WA_DUAL_QUEUE),
+		   XE_GT_WA(gt, 14014475959));
+}
+
 static u32 guc_ctl_devid(struct xe_guc *guc)
 {
 	struct xe_device *xe = guc_to_xe(guc);
@@ -268,6 +286,7 @@ static void guc_init_params_post_hwconfig(struct xe_guc *guc)
 	params[GUC_CTL_DEVID] = guc_ctl_devid(guc);
 
 	guc_print_params(guc);
+	guc_log_wa_validation(guc);
 }
 
 /*

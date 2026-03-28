@@ -304,22 +304,31 @@ static void guc_waklv_enable(struct xe_guc_ads *ads,
 	xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads),
 			 *offset + sizeof(u32), data, data_len_dw * sizeof(u32));
 
+	xe_gt_info(ads_to_gt(ads), "VAL/guc-wa emit-klv id=0x%04x len_dw=%u\n",
+		   klv_id, data_len_dw);
+
 	*offset += size;
 	*remain -= size;
 }
+
+#define VAL_GUC_WORKAROUND_KLV_SERIALIZED_RA_MODE 0x9001
+#define VAL_GUC_WORKAROUND_KLV_AVOID_GFX_CLEAR_WHILE_ACTIVE 0x9006
 
 static void guc_waklv_init(struct xe_guc_ads *ads)
 {
 	struct xe_gt *gt = ads_to_gt(ads);
 	u64 addr_ggtt;
 	u32 offset, remain, size;
+	bool emitted_9001 = false, emitted_9002 = false, emitted_9006 = false;
+	bool emitted_900b = false;
 
 	offset = guc_ads_waklv_offset(ads);
 	remain = guc_ads_waklv_size(ads);
 
 	if (XE_GT_WA(gt, 14019882105) || XE_GT_WA(gt, 16021333562))
 		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
-				 GUC_WORKAROUND_KLV_BLOCK_INTERRUPTS_WHEN_MGSR_BLOCKED);
+				 GUC_WORKAROUND_KLV_BLOCK_INTERRUPTS_WHEN_MGSR_BLOCKED),
+		emitted_9002 = true;
 	if (XE_GT_WA(gt, 18024947630))
 		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
 				 GUC_WORKAROUND_KLV_ID_GAM_PFQ_SHADOW_TAIL_POLLING);
@@ -349,7 +358,8 @@ static void guc_waklv_init(struct xe_guc_ads *ads)
 
 	if (GUC_FIRMWARE_VER(&gt->uc.guc) >= MAKE_GUC_VER(70, 44, 0) && XE_GT_WA(gt, 16026508708))
 		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
-				 GUC_WA_KLV_RESET_BB_STACK_PTR_ON_VF_SWITCH);
+				 GUC_WA_KLV_RESET_BB_STACK_PTR_ON_VF_SWITCH),
+		emitted_900b = true;
 	if (GUC_FIRMWARE_VER(&gt->uc.guc) >= MAKE_GUC_VER(70, 47, 0) && XE_GT_WA(gt, 16026007364)) {
 		u32 data[] = {
 			0x0,
@@ -362,6 +372,12 @@ static void guc_waklv_init(struct xe_guc_ads *ads)
 	if (XE_GT_WA(gt, 14020001231))
 		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
 				 GUC_WORKAROUND_KLV_DISABLE_PSMI_INTERRUPTS_AT_C6_ENTRY_RESTORE_AT_EXIT);
+
+	xe_gt_info(gt,
+		   "VAL/guc-wa klv-summary gfx=%d.%02d present[0x9001]=%u present[0x9002]=%u present[0x9006]=%u present[0x900b]=%u absences_mtl_path=0x9001:%u 0x9006:%u\n",
+		   GRAPHICS_VER(gt_to_xe(gt)), GRAPHICS_VERx100(gt_to_xe(gt)) % 100,
+		   emitted_9001, emitted_9002, emitted_9006, emitted_900b,
+		   !emitted_9001, !emitted_9006);
 
 	size = guc_ads_waklv_size(ads) - remain;
 	if (!size)
