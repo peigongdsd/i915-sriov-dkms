@@ -311,11 +311,24 @@ static void guc_waklv_enable(struct xe_guc_ads *ads,
 static void guc_waklv_init(struct xe_guc_ads *ads)
 {
 	struct xe_gt *gt = ads_to_gt(ads);
+	struct xe_device *xe = ads_to_xe(ads);
 	u64 addr_ggtt;
 	u32 offset, remain, size;
+	bool mtl_rcs_ccs_wa = !xe_gt_is_media_type(gt) &&
+		GRAPHICS_VERx100(xe) >= 1270 && GRAPHICS_VERx100(xe) <= 1274;
 
 	offset = guc_ads_waklv_offset(ads);
 	remain = guc_ads_waklv_size(ads);
+
+	if (GUC_FIRMWARE_VER(&gt->uc.guc) >= MAKE_GUC_VER(70, 10, 0) &&
+	    mtl_rcs_ccs_wa) {
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_SERIALIZED_RA_MODE);
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_AVOID_GFX_CLEAR_WHILE_ACTIVE);
+		xe_gt_info(gt,
+			   "xe: MTL GuC ADS WA path active: serialized_ra=1 avoid_gfx_clear=1\n");
+	}
 
 	if (XE_GT_WA(gt, 14019882105) || XE_GT_WA(gt, 16021333562))
 		guc_waklv_enable(ads, NULL, 0, &offset, &remain,

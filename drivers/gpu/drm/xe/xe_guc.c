@@ -180,6 +180,14 @@ static bool needs_wa_dual_queue(struct xe_gt *gt)
 	return false;
 }
 
+static bool needs_wa_mtl_rcs_ccs_switchout(struct xe_gt *gt)
+{
+	struct xe_device *xe = gt_to_xe(gt);
+	u32 ver = GRAPHICS_VERx100(xe);
+
+	return !xe_gt_is_media_type(gt) && ver >= 1270 && ver <= 1274;
+}
+
 static u32 guc_ctl_wa_flags(struct xe_guc *guc)
 {
 	struct xe_device *xe = guc_to_xe(guc);
@@ -189,8 +197,11 @@ static u32 guc_ctl_wa_flags(struct xe_guc *guc)
 	if (XE_GT_WA(gt, 22012773006))
 		flags |= GUC_WA_POLLCS;
 
-	if (XE_GT_WA(gt, 14014475959))
+	if (XE_GT_WA(gt, 14014475959) || needs_wa_mtl_rcs_ccs_switchout(gt))
 		flags |= GUC_WA_HOLD_CCS_SWITCHOUT;
+
+	if (needs_wa_mtl_rcs_ccs_switchout(gt))
+		flags |= GUC_WA_RCS_CCS_SWITCHOUT;
 
 	if (needs_wa_dual_queue(gt))
 		flags |= GUC_WA_DUAL_QUEUE;
@@ -218,6 +229,10 @@ static u32 guc_ctl_wa_flags(struct xe_guc *guc)
 
 	if (XE_GT_WA(gt, 16023683509))
 		flags |= GUC_WA_SAVE_RESTORE_MCFG_REG_AT_MC6;
+
+	if (needs_wa_mtl_rcs_ccs_switchout(gt))
+		xe_gt_info(gt,
+			   "xe: MTL GuC WA path active: hold_ccs_switchout=1 rcs_ccs_switchout=1\n");
 
 	return flags;
 }
