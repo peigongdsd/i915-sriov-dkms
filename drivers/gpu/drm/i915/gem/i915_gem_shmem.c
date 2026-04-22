@@ -546,7 +546,11 @@ static int __create_shmem(struct drm_i915_private *i915,
 			  struct drm_gem_object *obj,
 			  resource_size_t size)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+	vma_flags_t flags = mk_vma_flags(VMA_NORESERVE_BIT);
+#else
 	unsigned long flags = VM_NORESERVE;
+#endif
 	struct file *filp;
 
 	drm_gem_private_object_init(&i915->drm, obj, size);

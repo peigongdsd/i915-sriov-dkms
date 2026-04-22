@@ -200,7 +200,11 @@ static int i915_ttm_tt_shmem_populate(struct ttm_device *bdev,
 		struct address_space *mapping;
 		gfp_t mask;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+		filp = shmem_file_setup("i915-shmem-tt", size, mk_vma_flags(VMA_NORESERVE_BIT));
+#else
 		filp = shmem_file_setup("i915-shmem-tt", size, VM_NORESERVE);
+#endif
 		if (IS_ERR(filp))
 			return PTR_ERR(filp);
 

@@ -19,7 +19,11 @@ struct file *shmem_create_from_data(const char *name, void *data, size_t len)
 	struct file *file;
 	int err;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+	file = shmem_file_setup(name, PAGE_ALIGN(len), mk_vma_flags(VMA_NORESERVE_BIT));
+#else
 	file = shmem_file_setup(name, PAGE_ALIGN(len), VM_NORESERVE);
+#endif
 	if (IS_ERR(file))
 		return file;
 
