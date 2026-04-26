@@ -1,4 +1,21 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#ifndef __I915_SRIOV_LINUX_CLEANUP_WRAPPER_H
+#define __I915_SRIOV_LINUX_CLEANUP_WRAPPER_H
+
+#include <linux/version.h>
+
+/*
+ * This tree vendors Linux 6.19's cleanup helpers for older kernels, but newer
+ * kernels evolve the guard/cleanup APIs together with the rest of the core
+ * headers. Prefer the native header once the target kernel is new enough to
+ * provide it so we don't shadow newer lock-guard interfaces.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+
+#include_next <linux/cleanup.h>
+
+#else
+
 #ifndef _LINUX_CLEANUP_H
 #define _LINUX_CLEANUP_H
 
@@ -534,3 +551,6 @@ __DEFINE_LOCK_GUARD_0(_name, _lock)
 #define DEFINE_LOCK_GUARD_1_COND(X...) CONCATENATE(DEFINE_LOCK_GUARD_1_COND_, COUNT_ARGS(X))(X)
 
 #endif /* _LINUX_CLEANUP_H */
+
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0) */
+#endif /* __I915_SRIOV_LINUX_CLEANUP_WRAPPER_H */

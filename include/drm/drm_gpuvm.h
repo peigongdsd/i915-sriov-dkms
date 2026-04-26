@@ -3,6 +3,12 @@
 #ifndef __BACKPORT_DRM_GPUVM_H__
 #define __BACKPORT_DRM_GPUVM_H__
 
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+#define drm_gpuvm_bo_obtain drm_gpuvm_bo_obtain_locked
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
 #define DRM_GPUVA_OP_DRIVER ((enum drm_gpuva_op_type)(DRM_GPUVA_OP_PREFETCH + 1))
 #endif
