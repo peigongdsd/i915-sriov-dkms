@@ -88,16 +88,18 @@ static int pf_send_vf_buf_klvs(struct xe_gt *gt, u32 vfid, struct xe_guc_buf buf
 static int pf_push_vf_buf_klvs(struct xe_gt *gt, unsigned int vfid, u32 num_klvs,
 			       struct xe_guc_buf buf, u32 num_dwords)
 {
+	const u32 *klvs = xe_guc_buf_cpu_ptr(buf);
 	int ret;
 
 	ret = pf_send_vf_buf_klvs(gt, vfid, buf, num_dwords);
 
 	if (ret != num_klvs) {
 		int err = ret < 0 ? ret : ret < num_klvs ? -ENOKEY : -EPROTO;
-		void *klvs = xe_guc_buf_cpu_ptr(buf);
 		struct drm_printer p = xe_gt_info_printer(gt);
 		char name[8];
 
+		xe_gt_sriov_pf_debug_record_config_push(gt, vfid, klvs, num_dwords,
+							num_klvs, err);
 		xe_gt_sriov_notice(gt, "Failed to push %s %u config KLV%s (%pe)\n",
 				   xe_sriov_function_name(vfid, name, sizeof(name)),
 				   num_klvs, str_plural(num_klvs), ERR_PTR(err));
@@ -105,9 +107,11 @@ static int pf_push_vf_buf_klvs(struct xe_gt *gt, unsigned int vfid, u32 num_klvs
 		return err;
 	}
 
+	xe_gt_sriov_pf_debug_record_config_push(gt, vfid, klvs, num_dwords,
+						num_klvs, 0);
+
 	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_SRIOV)) {
 		struct drm_printer p = xe_gt_dbg_printer(gt);
-		void *klvs = xe_guc_buf_cpu_ptr(buf);
 		char name[8];
 
 		xe_gt_sriov_dbg(gt, "pushed %s config with %u KLV%s:\n",
@@ -371,7 +375,6 @@ static int pf_push_full_vf_config(struct xe_gt *gt, unsigned int vfid)
 	u32 num_dwords;
 	int num_klvs;
 	u32 *cfg;
-	int err;
 
 	if (!xe_guc_buf_is_valid(buf))
 		return -ENOBUFS;
@@ -404,10 +407,7 @@ static int pf_push_full_vf_config(struct xe_gt *gt, unsigned int vfid)
 	}
 
 	num_klvs = xe_guc_klv_count(cfg, num_dwords);
-	err = pf_push_vf_buf_klvs(gt, vfid, num_klvs, buf, num_dwords);
-	xe_gt_sriov_pf_debug_record_config_push(gt, vfid, cfg, num_dwords, num_klvs, err);
-
-	return err;
+	return pf_push_vf_buf_klvs(gt, vfid, num_klvs, buf, num_dwords);
 }
 
 static int pf_push_vf_cfg(struct xe_gt *gt, unsigned int vfid, bool reset)

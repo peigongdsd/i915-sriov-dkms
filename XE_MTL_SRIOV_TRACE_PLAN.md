@@ -6,6 +6,11 @@ This note records the next useful debug instrumentation for the Meteor Lake
 `xe` SR-IOV Windows glitch issue. It is intended to avoid re-studying the same
 branch history in future sessions.
 
+For the first live boot using the bounded PF debug branch, see
+`XE_MTL_SRIOV_TRACE_RESULTS_20260618.md`. That result note records the actual
+VF1 service/GGTT counters, tracefs correlation, PAT/MOCS observations, and the
+next low-noise capture pattern.
+
 The working model is not that `xe` cannot boot or render on MTL SR-IOV. Windows
 boots and graphics mostly work. The remaining issue is small stable corruption
 in modern Windows composition or shared-present paths, while the same platform

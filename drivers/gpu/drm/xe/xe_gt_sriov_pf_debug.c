@@ -8,6 +8,7 @@
 #include <linux/atomic.h>
 #include <linux/bitfield.h>
 #include <linux/bits.h>
+#include <linux/ktime.h>
 #include <linux/string.h>
 
 #include <drm/drm_print.h>
@@ -91,6 +92,39 @@ static bool debug_filter_match(struct xe_gt_sriov_pf_ggtt_debug *dbg, u32 start,
 	return start < filter_end && end > filter_start;
 }
 
+static void ggtt_record_history(struct xe_gt_sriov_pf_ggtt_debug *debug,
+				u32 source, u32 pte_offset, u32 mode,
+				u16 num_copies, u16 count, u32 n_ptes, int ret,
+				u32 pat_mask, u64 raw_first, u64 raw_last,
+				u64 final_first, u64 final_last, u64 old_first,
+				u64 raw_flags_mask, u64 final_flags_mask)
+{
+	u64 seq = atomic64_inc_return(&debug->history_seq);
+	struct xe_gt_sriov_pf_ggtt_record *record =
+		&debug->history[(seq - 1) % XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY];
+
+	WRITE_ONCE(record->ktime_ns, ktime_get_mono_fast_ns());
+	WRITE_ONCE(record->raw_first, raw_first);
+	WRITE_ONCE(record->raw_last, raw_last);
+	WRITE_ONCE(record->final_first, final_first);
+	WRITE_ONCE(record->final_last, final_last);
+	WRITE_ONCE(record->old_first, old_first);
+	WRITE_ONCE(record->raw_flags_mask, raw_flags_mask);
+	WRITE_ONCE(record->final_flags_mask, final_flags_mask);
+	WRITE_ONCE(record->source, source);
+	WRITE_ONCE(record->mode, mode);
+	WRITE_ONCE(record->num_copies, num_copies);
+	WRITE_ONCE(record->count, count);
+	WRITE_ONCE(record->n_ptes, n_ptes);
+	WRITE_ONCE(record->offset, pte_offset);
+	WRITE_ONCE(record->end, pte_offset + n_ptes);
+	WRITE_ONCE(record->ret, ret);
+	WRITE_ONCE(record->pat_mask, pat_mask);
+
+	/* Publish seq last so readers can skip partially updated records. */
+	WRITE_ONCE(record->seq, seq);
+}
+
 static void ggtt_decode_entry(const u64 *ptes, u16 count, u32 mode,
 			      u16 num_copies, u32 n, u64 *entry)
 {
@@ -132,6 +166,7 @@ void xe_gt_sriov_pf_debug_init(struct xe_gt *gt)
 		spin_lock_init(&debug->config.lock);
 		atomic_set(&debug->ggtt.log_budget, 0);
 		atomic_set(&debug->ggtt.raw_budget, 0);
+		atomic64_set(&debug->ggtt.history_seq, 0);
 		atomic_set(&debug->config.log_budget, 0);
 		atomic_set(&debug->service.log_budget, 0);
 		debug->ggtt.snapshot_count = 32;
@@ -378,6 +413,10 @@ void xe_gt_sriov_pf_debug_record_ggtt_update(struct xe_gt *gt, unsigned int vfid
 	WRITE_ONCE(debug->last_raw_flags_mask, raw_flags_mask);
 	WRITE_ONCE(debug->last_final_flags_mask, final_flags_mask);
 
+	ggtt_record_history(debug, source, pte_offset, mode, num_copies, count, n_ptes, ret,
+			    pat_mask, raw_first, raw_last, final_first, final_last,
+			    old_first, raw_flags_mask, final_flags_mask);
+
 	if (!debug_filter_match(debug, pte_offset, max_t(u32, n_ptes, 1)))
 		return;
 
@@ -480,6 +519,8 @@ int xe_gt_sriov_pf_debug_print_ggtt(struct xe_gt *gt, unsigned int vfid,
 				    struct drm_printer *p)
 {
 	struct xe_gt_sriov_pf_ggtt_debug *debug;
+	u64 history_seq, first_seq, seq;
+	bool any_history = false;
 	u32 i;
 
 	if (unlikely(vfid > xe_gt_sriov_pf_get_totalvfs(gt)))
@@ -535,6 +576,38 @@ int xe_gt_sriov_pf_debug_print_ggtt(struct xe_gt *gt, unsigned int vfid,
 	drm_printf(p, "last_raw_flags_mask: %#llx\n", READ_ONCE(debug->last_raw_flags_mask));
 	drm_printf(p, "last_final_flags_mask: %#llx\n",
 		   READ_ONCE(debug->last_final_flags_mask));
+	history_seq = atomic64_read(&debug->history_seq);
+	drm_printf(p, "history_seq: %llu\n", history_seq);
+
+	drm_puts(p, "\nhistory:\n");
+	if (history_seq > XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY)
+		first_seq = history_seq - XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY + 1;
+	else
+		first_seq = 1;
+
+	for (seq = first_seq; seq <= history_seq; seq++) {
+		struct xe_gt_sriov_pf_ggtt_record *record =
+			&debug->history[(seq - 1) % XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY];
+
+		if (READ_ONCE(record->seq) != seq)
+			continue;
+
+		any_history = true;
+		drm_printf(p,
+			   "[%llu] t=%lluns %s off=%u..%u mode=%s copies=%u count=%u ptes=%u ret=%d pat_mask=%#x flags=%#llx final_flags=%#llx old=%#llx raw=%#llx..%#llx final=%#llx..%#llx\n",
+			   seq, READ_ONCE(record->ktime_ns),
+			   ggtt_update_source_to_string(READ_ONCE(record->source)),
+			   READ_ONCE(record->offset), READ_ONCE(record->end),
+			   ggtt_update_mode_to_string(READ_ONCE(record->mode)),
+			   READ_ONCE(record->num_copies), READ_ONCE(record->count),
+			   READ_ONCE(record->n_ptes), READ_ONCE(record->ret),
+			   READ_ONCE(record->pat_mask), READ_ONCE(record->raw_flags_mask),
+			   READ_ONCE(record->final_flags_mask), READ_ONCE(record->old_first),
+			   READ_ONCE(record->raw_first), READ_ONCE(record->raw_last),
+			   READ_ONCE(record->final_first), READ_ONCE(record->final_last));
+	}
+	if (!any_history)
+		drm_puts(p, "(empty)\n");
 
 	return 0;
 }
