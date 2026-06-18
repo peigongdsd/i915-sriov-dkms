@@ -119,7 +119,6 @@ static void pf_enable_gsc_engine(struct xe_device *xe)
 		xe_gsc_load_start(&gt->uc.gsc);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)  // incompatible before 6.17
 static int resize_vf_vram_bar(struct xe_device *xe, int num_vfs)
 {
 	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
@@ -131,7 +130,6 @@ static int resize_vf_vram_bar(struct xe_device *xe, int num_vfs)
 
 	return pci_iov_vf_bar_set_size(pdev, VF_LMEM_BAR, __fls(sizes));
 }
-#endif
 
 static int pf_prepare_vfs_enabling(struct xe_device *xe)
 {
@@ -188,13 +186,11 @@ static int pf_enable_vfs(struct xe_device *xe, int num_vfs)
 	if (err < 0)
 		goto failed;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0) 
 	if (IS_DGFX(xe)) {
 		err = resize_vf_vram_bar(xe, num_vfs);
 		if (err)
 			xe_sriov_info(xe, "Failed to set VF LMEM BAR size: %d\n", err);
 	}
-#endif
 
 	err = pci_enable_sriov(pdev, num_vfs);
 	if (err < 0)
@@ -270,7 +266,6 @@ static int pf_disable_vfs(struct xe_device *xe)
 int xe_pci_sriov_configure(struct pci_dev *pdev, int num_vfs)
 {
 	struct xe_device *xe = pdev_to_xe_device(pdev);
-	int ret;
 
 	if (!IS_SRIOV_PF(xe))
 		return -ENODEV;
@@ -284,14 +279,11 @@ int xe_pci_sriov_configure(struct pci_dev *pdev, int num_vfs)
 	if (num_vfs && pci_num_vf(pdev))
 		return -EBUSY;
 
-	xe_pm_runtime_get(xe);
+	guard(xe_pm_runtime)(xe);
 	if (num_vfs > 0)
-		ret = pf_enable_vfs(xe, num_vfs);
+		return pf_enable_vfs(xe, num_vfs);
 	else
-		ret = pf_disable_vfs(xe);
-	xe_pm_runtime_put(xe);
-
-	return ret;
+		return pf_disable_vfs(xe);
 }
 
 /**

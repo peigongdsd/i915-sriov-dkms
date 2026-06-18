@@ -1,6 +1,4 @@
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 #include_next <linux/intel_dg_nvm_aux.h>
-#endif
 
 #ifndef __BACKPORT_INTEL_DG_NVM_AUX_H__
 #define __BACKPORT_INTEL_DG_NVM_AUX_H__

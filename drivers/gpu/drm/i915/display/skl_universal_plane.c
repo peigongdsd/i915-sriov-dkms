@@ -10,7 +10,6 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_print.h>
 
-#include "pxp/intel_pxp.h"
 #include "intel_bo.h"
 #include "intel_color.h"
 #include "intel_color_pipeline.h"
@@ -23,7 +22,7 @@
 #include "intel_fb.h"
 #include "intel_fbc.h"
 #include "intel_frontbuffer.h"
-#include "intel_panic.h"
+#include "intel_parent.h"
 #include "intel_plane.h"
 #include "intel_psr.h"
 #include "intel_psr_regs.h"
@@ -598,7 +597,7 @@ static u32 tgl_plane_min_alignment(struct intel_plane *plane,
 	 * Figure out what's going on here...
 	 */
 	if (display->platform.alderlake_p &&
-	    intel_plane_can_async_flip(plane, fb->format->format, fb->modifier))
+	    intel_plane_can_async_flip(plane, fb->format, fb->modifier))
 		return mult * 16 * 1024;
 
 	switch (fb->modifier) {
@@ -940,7 +939,7 @@ skl_plane_get_hw_state(struct intel_plane *plane,
 	struct intel_display *display = to_intel_display(plane);
 	enum intel_display_power_domain power_domain;
 	enum plane_id plane_id = plane->id;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	power_domain = POWER_DOMAIN_PIPE(plane->pipe);
@@ -1606,7 +1605,7 @@ icl_plane_update_noarm(struct intel_dsb *dsb,
 	}
 
 	/* FLAT CCS doesn't need to program AUX_DIST */
-	if (HAS_AUX_CCS(display))
+	if (HAS_AUX_DIST(display))
 		intel_de_write_dsb(display, dsb, PLANE_AUX_DIST(pipe, plane_id),
 				   skl_plane_aux_dist(plane_state, color_plane));
 
@@ -2315,7 +2314,7 @@ static void check_protection(struct intel_plane_state *plane_state)
 	if (DISPLAY_VER(display) < 11)
 		return;
 
-	plane_state->decrypt = intel_pxp_key_check(obj, false) == 0;
+	plane_state->decrypt = intel_bo_key_check(obj) == 0;
 	plane_state->force_black = intel_bo_is_protected(obj) &&
 		!plane_state->decrypt;
 }
@@ -2469,7 +2468,7 @@ static struct intel_fbc *skl_plane_fbc(struct intel_display *display,
 	enum intel_fbc_id fbc_id = skl_fbc_id_for_pipe(pipe);
 
 	if (skl_plane_has_fbc(display, fbc_id, plane_id))
-		return display->fbc[fbc_id];
+		return display->fbc.instances[fbc_id];
 	else
 		return NULL;
 }
@@ -2702,9 +2701,7 @@ static const struct drm_plane_funcs skl_plane_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = skl_plane_format_mod_supported,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 	.format_mod_supported_async = intel_plane_format_mod_supported_async,
-#endif
 };
 
 static const struct drm_plane_funcs icl_plane_funcs = {
@@ -2714,9 +2711,7 @@ static const struct drm_plane_funcs icl_plane_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = icl_plane_format_mod_supported,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 	.format_mod_supported_async = intel_plane_format_mod_supported_async,
-#endif
 };
 
 static const struct drm_plane_funcs tgl_plane_funcs = {
@@ -2726,9 +2721,7 @@ static const struct drm_plane_funcs tgl_plane_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = tgl_plane_format_mod_supported,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 	.format_mod_supported_async = intel_plane_format_mod_supported_async,
-#endif
 };
 
 static void
@@ -2986,12 +2979,6 @@ skl_universal_plane_create(struct intel_display *display,
 	else
 		caps = skl_plane_caps(display, pipe, plane_id);
 
-	/* FIXME: xe has problems with AUX */
-	if (!IS_ENABLED(I915) && HAS_AUX_CCS(display))
-		caps &= ~(INTEL_PLANE_CAP_CCS_RC |
-			  INTEL_PLANE_CAP_CCS_RC_CC |
-			  INTEL_PLANE_CAP_CCS_MC);
-
 	modifiers = intel_fb_plane_get_modifiers(display, caps);
 
 	ret = drm_universal_plane_init(display->drm, &plane->base,
@@ -3169,11 +3156,7 @@ skl_get_initial_plane_config(struct intel_crtc *crtc,
 		goto error;
 	}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-	fb->format = backport__drm_get_format_info6p16(display->drm, fourcc, fb->modifier);
-#else
 	fb->format = drm_get_format_info(display->drm, fourcc, fb->modifier);
-#endif
 
 	if (!display->params.enable_dpt &&
 	    intel_fb_modifier_uses_dpt(display, fb->modifier)) {

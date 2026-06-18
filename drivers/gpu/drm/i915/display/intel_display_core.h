@@ -386,7 +386,7 @@ struct intel_display {
 
 	struct {
 		struct intel_dmc *dmc;
-		intel_wakeref_t wakeref;
+		struct ref_tracker *wakeref;
 	} dmc;
 
 	struct {
@@ -395,11 +395,23 @@ struct intel_display {
 	} dsi;
 
 	struct {
+		const struct dram_info *info;
+	} dram;
+
+	struct {
+		struct intel_fbc *instances[I915_MAX_FBCS];
+
+		/* xe3p_lpd+: FBC instance utilizing the system cache */
+		struct sys_cache_cfg {
+			/* Protect concurrecnt access to system cache configuration */
+			struct mutex lock;
+			enum intel_fbc_id id;
+		} sys_cache;
+	} fbc;
+
+	struct {
 		/* list of fbdev register on this device */
 		struct intel_fbdev *fbdev;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-		struct work_struct suspend_work;
-#endif
 	} fbdev;
 
 	struct {
@@ -614,7 +626,6 @@ struct intel_display {
 	struct drm_dp_tunnel_mgr *dp_tunnel_mgr;
 	struct intel_audio audio;
 	struct intel_dpll_global dpll;
-	struct intel_fbc *fbc[I915_MAX_FBCS];
 	struct intel_frontbuffer_tracking fb_tracking;
 	struct intel_hotplug hotplug;
 	struct intel_opregion *opregion;

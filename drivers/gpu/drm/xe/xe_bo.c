@@ -14,9 +14,7 @@
 #endif
 #include <drm/drm_gem_ttm_helper.h>
 #include <drm/drm_managed.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 #include <drm/ttm/ttm_backup.h>
-#endif
 #include <drm/ttm/ttm_device.h>
 #include <drm/ttm/ttm_placement.h>
 #include <drm/ttm/ttm_tt.h>
@@ -30,9 +28,9 @@
 #include "xe_dma_buf.h"
 #include "xe_drm_client.h"
 #include "xe_ggtt.h"
-#include "xe_gt.h"
 #include "xe_map.h"
 #include "xe_migrate.h"
+#include "xe_pat.h"
 #include "xe_pm.h"
 #include "xe_preempt_fence.h"
 #include "xe_pxp.h"
@@ -436,7 +434,6 @@ struct sg_table *xe_bo_sg(struct xe_bo *bo)
 	return xe_tt->sg;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 /*
  * Account ttm pages against the device shrinker's shrinkable and
  * purgeable counts.
@@ -460,9 +457,7 @@ static void xe_ttm_tt_account_subtract(struct xe_device *xe, struct ttm_tt *tt)
 	else
 		xe_shrinker_mod_pages(xe->mem.shrinker, -(long)tt->num_pages, 0);
 }
-#endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 static void update_global_total_pages(struct ttm_device *ttm_dev,
 				      long num_pages)
 {
@@ -475,7 +470,6 @@ static void update_global_total_pages(struct ttm_device *ttm_dev,
 			    global_total_pages << PAGE_SHIFT);
 #endif
 }
-#endif
 
 static struct ttm_tt *xe_ttm_tt_create(struct ttm_buffer_object *ttm_bo,
 				       u32 page_flags)
@@ -488,7 +482,7 @@ static struct ttm_tt *xe_ttm_tt_create(struct ttm_buffer_object *ttm_bo,
 	enum ttm_caching caching = ttm_cached;
 	int err;
 
-	xe_tt = kzalloc(sizeof(*xe_tt), GFP_KERNEL);
+	xe_tt = kzalloc_obj(*xe_tt);
 	if (!xe_tt)
 		return NULL;
 
@@ -524,8 +518,7 @@ static struct ttm_tt *xe_ttm_tt_create(struct ttm_buffer_object *ttm_bo,
 		 * non-coherent and require a CPU:WC mapping.
 		 */
 		if ((!bo->cpu_caching && bo->flags & XE_BO_FLAG_SCANOUT) ||
-		    (xe->info.graphics_verx100 >= 1270 &&
-		     bo->flags & XE_BO_FLAG_PAGETABLE))
+		     (!xe->info.has_cached_pt && bo->flags & XE_BO_FLAG_PAGETABLE))
 			caching = ttm_write_combined;
 	}
 
@@ -547,7 +540,6 @@ static struct ttm_tt *xe_ttm_tt_create(struct ttm_buffer_object *ttm_bo,
 		return NULL;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	if (ttm_bo->type != ttm_bo_type_sg) {
 		err = ttm_tt_setup_backup(tt);
 		if (err) {
@@ -556,7 +548,6 @@ static struct ttm_tt *xe_ttm_tt_create(struct ttm_buffer_object *ttm_bo,
 			return NULL;
 		}
 	}
-#endif
 
 	return tt;
 }
@@ -575,24 +566,18 @@ static int xe_ttm_tt_populate(struct ttm_device *ttm_dev, struct ttm_tt *tt,
 	    !(tt->page_flags & TTM_TT_FLAG_EXTERNAL_MAPPABLE))
 		return 0;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-	err = ttm_pool_alloc(&ttm_dev->pool, tt, ctx);
-#else
 	if (ttm_tt_is_backed_up(tt) && !xe_tt->purgeable) {
 		err = ttm_tt_restore(ttm_dev, tt, ctx);
 	} else {
 		ttm_tt_clear_backed_up(tt);
 		err = ttm_pool_alloc(&ttm_dev->pool, tt, ctx);
 	}
-#endif
 	if (err)
 		return err;
 
 	xe_tt->purgeable = false;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	xe_ttm_tt_account_add(ttm_to_xe_device(ttm_dev), tt);
 	update_global_total_pages(ttm_dev, tt->num_pages);
-#endif
 	return 0;
 }
 
@@ -607,10 +592,8 @@ static void xe_ttm_tt_unpopulate(struct ttm_device *ttm_dev, struct ttm_tt *tt)
 	xe_tt_unmap_sg(xe, tt);
 
 	ttm_pool_free(&ttm_dev->pool, tt);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	xe_ttm_tt_account_subtract(xe, tt);
 	update_global_total_pages(ttm_dev, -(long)tt->num_pages);
-#endif
 }
 
 static void xe_ttm_tt_destroy(struct ttm_device *ttm_dev, struct ttm_tt *tt)
@@ -1067,7 +1050,6 @@ out:
 	return ret;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 static long xe_bo_shrink_purge(struct ttm_operation_ctx *ctx,
 			       struct ttm_buffer_object *bo,
 			       unsigned long *scanned)
@@ -1105,7 +1087,6 @@ static long xe_bo_shrink_purge(struct ttm_operation_ctx *ctx,
 
 	return lret;
 }
-#endif
 
 static bool
 xe_bo_eviction_valuable(struct ttm_buffer_object *bo, const struct ttm_place *place)
@@ -1126,7 +1107,6 @@ xe_bo_eviction_valuable(struct ttm_buffer_object *bo, const struct ttm_place *pl
 	return true;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 /**
  * xe_bo_shrink() - Try to shrink an xe bo.
  * @ctx: The struct ttm_operation_ctx used for shrinking.
@@ -1199,7 +1179,6 @@ out_unref:
 
 	return lret;
 }
-#endif
 
 /**
  * xe_bo_notifier_prepare_pinned() - Prepare a pinned VRAM object to be backed
@@ -1736,7 +1715,7 @@ static void xe_ttm_bo_destroy(struct ttm_buffer_object *ttm_bo)
 	xe_assert(xe, list_empty(&ttm_bo->base.gpuva.list));
 
 	for_each_tile(tile, xe, id)
-		if (bo->ggtt_node[id] && bo->ggtt_node[id]->base.size)
+		if (bo->ggtt_node[id])
 			xe_ggtt_remove_bo(tile->mem.ggtt, bo);
 
 #ifdef CONFIG_PROC_FS
@@ -1835,11 +1814,7 @@ static int xe_bo_fault_migrate(struct xe_bo *bo, struct ttm_operation_ctx *ctx,
 	if (ttm_manager_type(tbo->bdev, tbo->resource->mem_type)->use_tt) {
 		err = xe_bo_wait_usage_kernel(bo, ctx);
 		if (!err)
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
-			err = ttm_tt_populate(bo->ttm.bdev, bo->ttm.ttm, ctx);
-#else
 			err = ttm_bo_populate(&bo->ttm, ctx);
-#endif
 	} else if (should_migrate_to_smem(bo)) {
 		xe_assert(xe_bo_device(bo), bo->flags & XE_BO_FLAG_SYSTEM);
 		err = xe_bo_migrate(bo, XE_PL_TT, ctx, exec);
@@ -2060,13 +2035,9 @@ static int xe_bo_vm_access(struct vm_area_struct *vma, unsigned long addr,
 	struct ttm_buffer_object *ttm_bo = vma->vm_private_data;
 	struct xe_bo *bo = ttm_to_xe_bo(ttm_bo);
 	struct xe_device *xe = xe_bo_device(bo);
-	int ret;
 
-	xe_pm_runtime_get(xe);
-	ret = ttm_bo_vm_access(vma, addr, buf, len, write);
-	xe_pm_runtime_put(xe);
-
-	return ret;
+	guard(xe_pm_runtime)(xe);
+	return ttm_bo_vm_access(vma, addr, buf, len, write);
 }
 
 /**
@@ -2123,7 +2094,7 @@ static const struct drm_gem_object_funcs xe_gem_object_funcs = {
  */
 struct xe_bo *xe_bo_alloc(void)
 {
-	struct xe_bo *bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	struct xe_bo *bo = kzalloc_obj(*bo);
 
 	if (!bo)
 		return ERR_PTR(-ENOMEM);
@@ -2824,10 +2795,8 @@ int xe_bo_pin_external(struct xe_bo *bo, bool in_place, struct drm_exec *exec)
 	}
 
 	ttm_bo_pin(&bo->ttm);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	if (bo->ttm.ttm && ttm_tt_is_populated(bo->ttm.ttm))
 		xe_ttm_tt_account_subtract(xe, bo->ttm.ttm);
-#endif
 
 	/*
 	 * FIXME: If we always use the reserve / unreserve functions for locking
@@ -2884,10 +2853,8 @@ int xe_bo_pin(struct xe_bo *bo, struct drm_exec *exec)
 	}
 
 	ttm_bo_pin(&bo->ttm);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	if (bo->ttm.ttm && ttm_tt_is_populated(bo->ttm.ttm))
 		xe_ttm_tt_account_subtract(xe, bo->ttm.ttm);
-#endif
 
 	/*
 	 * FIXME: If we always use the reserve / unreserve functions for locking
@@ -2922,10 +2889,8 @@ void xe_bo_unpin_external(struct xe_bo *bo)
 	spin_unlock(&xe->pinned.lock);
 
 	ttm_bo_unpin(&bo->ttm);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	if (bo->ttm.ttm && ttm_tt_is_populated(bo->ttm.ttm))
 		xe_ttm_tt_account_add(xe, bo->ttm.ttm);
-#endif
 
 	/*
 	 * FIXME: If we always use the reserve / unreserve functions for locking
@@ -2956,10 +2921,8 @@ void xe_bo_unpin(struct xe_bo *bo)
 		}
 	}
 	ttm_bo_unpin(&bo->ttm);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	if (bo->ttm.ttm && ttm_tt_is_populated(bo->ttm.ttm))
 		xe_ttm_tt_account_add(xe, bo->ttm.ttm);
-#endif
 }
 
 /**
@@ -3218,7 +3181,8 @@ int xe_gem_create_ioctl(struct drm_device *dev, void *data,
 	if (XE_IOCTL_DBG(xe, args->flags &
 			 ~(DRM_XE_GEM_CREATE_FLAG_DEFER_BACKING |
 			   DRM_XE_GEM_CREATE_FLAG_SCANOUT |
-			   DRM_XE_GEM_CREATE_FLAG_NEEDS_VISIBLE_VRAM)))
+			   DRM_XE_GEM_CREATE_FLAG_NEEDS_VISIBLE_VRAM |
+			   DRM_XE_GEM_CREATE_FLAG_NO_COMPRESSION)))
 		return -EINVAL;
 
 	if (XE_IOCTL_DBG(xe, args->handle))
@@ -3239,6 +3203,12 @@ int xe_gem_create_ioctl(struct drm_device *dev, void *data,
 
 	if (args->flags & DRM_XE_GEM_CREATE_FLAG_SCANOUT)
 		bo_flags |= XE_BO_FLAG_SCANOUT;
+
+	if (args->flags & DRM_XE_GEM_CREATE_FLAG_NO_COMPRESSION) {
+		if (XE_IOCTL_DBG(xe, GRAPHICS_VER(xe) < 20))
+			return -EOPNOTSUPP;
+		bo_flags |= XE_BO_FLAG_NO_COMPRESSION;
+	}
 
 	bo_flags |= args->placement << (ffs(XE_BO_FLAG_SYSTEM) - 1);
 
@@ -3557,12 +3527,16 @@ bool xe_bo_needs_ccs_pages(struct xe_bo *bo)
 	if (IS_DGFX(xe) && (bo->flags & XE_BO_FLAG_SYSTEM))
 		return false;
 
+	/* Check if userspace explicitly requested no compression */
+	if (bo->flags & XE_BO_FLAG_NO_COMPRESSION)
+		return false;
+
 	/*
-	 * Compression implies coh_none, therefore we know for sure that WB
-	 * memory can't currently use compression, which is likely one of the
-	 * common cases.
+	 * For WB (Write-Back) CPU caching mode, check if the device
+	 * supports WB compression with coherency.
 	 */
-	if (bo->cpu_caching == DRM_XE_GEM_CPU_CACHING_WB)
+	if (bo->cpu_caching == DRM_XE_GEM_CPU_CACHING_WB &&
+	    xe->pat.idx[XE_CACHE_WB_COMPRESSION] == XE_PAT_INVALID_IDX)
 		return false;
 
 	return true;
@@ -3639,8 +3613,8 @@ void xe_bo_put(struct xe_bo *bo)
 			might_lock(&bo->client->bos_lock);
 #endif
 		for_each_tile(tile, xe_bo_device(bo), id)
-			if (bo->ggtt_node[id] && bo->ggtt_node[id]->ggtt)
-				xe_ggtt_might_lock(bo->ggtt_node[id]->ggtt);
+			if (bo->ggtt_node[id])
+				xe_ggtt_might_lock(tile->mem.ggtt);
 		drm_gem_object_put(&bo->ttm.base);
 	}
 }

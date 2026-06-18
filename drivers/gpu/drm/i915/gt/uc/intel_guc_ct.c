@@ -299,10 +299,6 @@ int intel_guc_ct_init(struct intel_guc_ct *ct)
 	u32 *cmds;
 	int err;
 
-	err = i915_inject_probe_error(guc_to_i915(guc), -ENXIO);
-	if (err)
-		return err;
-
 	GEM_BUG_ON(ct->vma);
 
 	blob_size = 2 * CTB_DESC_SIZE + CTB_H2G_BUFFER_SIZE + CTB_G2H_BUFFER_SIZE;
@@ -339,6 +335,7 @@ int intel_guc_ct_init(struct intel_guc_ct *ct)
 
 	return 0;
 }
+ALLOW_ERROR_INJECTION(intel_guc_ct_init, ERRNO);
 
 void intel_guc_ct_sanitize(struct intel_guc_ct *ct)
 {
@@ -939,7 +936,7 @@ static struct ct_incoming_msg *ct_alloc_msg(u32 num_dwords)
 {
 	struct ct_incoming_msg *msg;
 
-	msg = kmalloc(struct_size(msg, msg, num_dwords), GFP_ATOMIC);
+	msg = kmalloc_flex(*msg, msg, num_dwords, GFP_ATOMIC);
 	if (msg)
 		msg->size = num_dwords;
 	return msg;
@@ -1664,9 +1661,6 @@ static void ct_dead_ct_worker_func(struct work_struct *w)
 	struct intel_guc *guc = ct_to_guc(ct);
 
 	if (ct->dead_ct_reported)
-		return;
-
-	if (i915_error_injected())
 		return;
 
 	ct->dead_ct_reported = true;

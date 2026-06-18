@@ -9,14 +9,19 @@
 #include <linux/uio.h>
 
 #include <drm/drm_cache.h>
+#include <drm/drm_gem.h>
+#include <drm/drm_print.h>
 
 #include "gem/i915_gem_region.h"
 #include "i915_drv.h"
 #include "i915_gem_object.h"
 #include "i915_gem_tiling.h"
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 #include "i915_gemfs.h"
+#endif
 #include "i915_scatterlist.h"
 #include "i915_trace.h"
+#include "i915_utils.h"
 
 /*
  * Move folios to appropriate lru and release the batch, decrementing the
@@ -151,8 +156,12 @@ int shmem_sg_alloc_table(struct drm_i915_private *i915, struct sg_table *st,
 			}
 		} while (1);
 
-		nr_pages = min_t(unsigned long,
-				folio_nr_pages(folio), page_count - i);
+		nr_pages = min_array(((unsigned long[]) {
+					folio_nr_pages(folio),
+					page_count - i,
+					max_segment / PAGE_SIZE,
+				      }), 3);
+
 		if (!i ||
 		    sg->length >= max_segment ||
 		    folio_pfn(folio) != next_pfn) {
@@ -162,7 +171,9 @@ int shmem_sg_alloc_table(struct drm_i915_private *i915, struct sg_table *st,
 			st->nents++;
 			sg_set_folio(sg, folio, nr_pages * PAGE_SIZE, 0);
 		} else {
-			/* XXX: could overflow? */
+			nr_pages = min_t(unsigned long, nr_pages,
+					 (max_segment - sg->length) / PAGE_SIZE);
+
 			sg->length += nr_pages * PAGE_SIZE;
 		}
 		next_pfn = folio_pfn(folio) + nr_pages;
@@ -220,7 +231,7 @@ static int shmem_get_pages(struct drm_i915_gem_object *obj)
 	GEM_BUG_ON(obj->write_domain & I915_GEM_GPU_DOMAINS);
 
 rebuild_st:
-	st = kmalloc(sizeof(*st), GFP_KERNEL | __GFP_NOWARN);
+	st = kmalloc_obj(*st, GFP_KERNEL | __GFP_NOWARN);
 	if (!st)
 		return -ENOMEM;
 
@@ -296,50 +307,6 @@ shmem_truncate(struct drm_i915_gem_object *obj)
 	return 0;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
-void __shmem_writeback(size_t size, struct address_space *mapping)
-{
-	struct writeback_control wbc = {
-		.sync_mode = WB_SYNC_NONE,
-		.nr_to_write = SWAP_CLUSTER_MAX,
-		.range_start = 0,
-		.range_end = LLONG_MAX,
-		.for_reclaim = 1,
-	};
-	unsigned long i;
-
-
-	/*
-	 * Leave mmapings intact (GTT will have been revoked on unbinding,
-	 * leaving only CPU mmapings around) and add those pages to the LRU
-	 * instead of invoking writeback so they are aged and paged out
-	 * as normal.
-	 */
-
-	/* Begin writeback on each dirty page */
-	for (i = 0; i < size >> PAGE_SHIFT; i++) {
-		struct page *page;
-
-		page = find_lock_page(mapping, i);
-		if (!page)
-			continue;
-
-		if (!page_mapped(page) && clear_page_dirty_for_io(page)) {
-			int ret;
-
-			SetPageReclaim(page);
-			ret = mapping->a_ops->writepage(page, &wbc);
-			if (!PageWriteback(page))
-				ClearPageReclaim(page);
-			if (!ret)
-				goto put;
-		}
-		unlock_page(page);
-put:
-		put_page(page);
-	}
-}
-#else
 void __shmem_writeback(size_t size, struct address_space *mapping)
 {
 	struct writeback_control wbc = {
@@ -361,15 +328,10 @@ void __shmem_writeback(size_t size, struct address_space *mapping)
 		if (folio_mapped(folio))
 			folio_redirty_for_writepage(&wbc, folio);
 		else
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-			error = shmem_writeout(folio, &wbc);
-#else
 			error = shmem_writeout(folio, NULL, NULL);
-#endif
 
 	}
 }
-#endif
 
 static void
 shmem_writeback(struct drm_i915_gem_object *obj)
@@ -544,9 +506,15 @@ const struct drm_i915_gem_object_ops i915_gem_shmem_ops = {
 
 static int __create_shmem(struct drm_i915_private *i915,
 			  struct drm_gem_object *obj,
-			  resource_size_t size)
+			  resource_size_t size,
+			  unsigned int flags)
 {
-	unsigned long flags = VM_NORESERVE;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
+	unsigned long shmem_flags = VM_NORESERVE;
+#else
+	const vma_flags_t shmem_flags = mk_vma_flags(VMA_NORESERVE_BIT);
+	struct vfsmount *huge_mnt;
+#endif
 	struct file *filp;
 
 	drm_gem_private_object_init(&i915->drm, obj, size);
@@ -564,12 +532,20 @@ static int __create_shmem(struct drm_i915_private *i915,
 	 */
 	if (BITS_PER_LONG == 64 && size > MAX_LFS_FILESIZE)
 		return -E2BIG;
-
-	if (i915->mm.gemfs)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
+	if (!(flags & I915_BO_ALLOC_NOTHP) && i915->mm.gemfs)
 		filp = shmem_file_setup_with_mnt(i915->mm.gemfs, "i915", size,
-						 flags);
+						 shmem_flags);
 	else
-		filp = shmem_file_setup("i915", size, flags);
+		filp = shmem_file_setup("i915", size, shmem_flags);
+#else
+	huge_mnt = drm_gem_get_huge_mnt(&i915->drm);
+	if (!(flags & I915_BO_ALLOC_NOTHP) && huge_mnt)
+		filp = shmem_file_setup_with_mnt(huge_mnt, "i915", size,
+						 shmem_flags);
+	else
+		filp = shmem_file_setup("i915", size, shmem_flags);
+#endif
 	if (IS_ERR(filp))
 		return PTR_ERR(filp);
 
@@ -598,7 +574,7 @@ static int shmem_object_init(struct intel_memory_region *mem,
 	gfp_t mask;
 	int ret;
 
-	ret = __create_shmem(i915, &obj->base, size);
+	ret = __create_shmem(i915, &obj->base, size, flags);
 	if (ret)
 		return ret;
 
@@ -692,6 +668,7 @@ fail:
 	return ERR_PTR(err);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 static int init_shmem(struct intel_memory_region *mem)
 {
 	i915_gemfs_init(mem->i915);
@@ -705,10 +682,47 @@ static int release_shmem(struct intel_memory_region *mem)
 	i915_gemfs_fini(mem->i915);
 	return 0;
 }
+#else
+static int init_shmem(struct intel_memory_region *mem)
+{
+	struct drm_i915_private *i915 = mem->i915;
+
+	/*
+	 * By creating our own shmemfs mountpoint, we can pass in
+	 * mount flags that better match our usecase.
+	 *
+	 * One example, although it is probably better with a per-file
+	 * control, is selecting huge page allocations ("huge=within_size").
+	 * However, we only do so on platforms which benefit from it, or to
+	 * offset the overhead of iommu lookups, where with latter it is a net
+	 * win even on platforms which would otherwise see some performance
+	 * regressions such a slow reads issue on Broadwell and Skylake.
+	 */
+
+	if (GRAPHICS_VER(i915) < 11 && !i915_vtd_active(i915))
+		goto no_thp;
+
+	drm_gem_huge_mnt_create(&i915->drm, "within_size");
+	if (drm_gem_get_huge_mnt(&i915->drm))
+		drm_info(&i915->drm, "Using Transparent Hugepages\n");
+	else
+		drm_notice(&i915->drm,
+			   "Transparent Hugepage support is recommended for optimal performance%s\n",
+			   GRAPHICS_VER(i915) >= 11 ? " on this platform!" :
+						      " when IOMMU is enabled!");
+
+ no_thp:
+	intel_memory_region_set_name(mem, "system");
+
+	return 0; /* We have fallback to the kernel mnt if huge mnt failed. */
+}
+#endif
 
 static const struct intel_memory_region_ops shmem_region_ops = {
 	.init = init_shmem,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 	.release = release_shmem,
+#endif
 	.init_object = shmem_object_init,
 };
 

@@ -474,7 +474,7 @@ static bool __intel_sdvo_write_cmd(struct intel_sdvo *intel_sdvo, u8 cmd,
 	if (!buf)
 		return false;
 
-	msgs = kcalloc(args_len + 3, sizeof(*msgs), GFP_KERNEL);
+	msgs = kzalloc_objs(*msgs, args_len + 3);
 	if (!msgs) {
 		kfree(buf);
 		return false;
@@ -1934,13 +1934,8 @@ static void intel_enable_sdvo(struct intel_atomic_state *state,
 }
 
 static enum drm_mode_status
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-intel_sdvo_mode_valid(struct drm_connector *connector,
-		      struct drm_display_mode *mode)
-#else
 intel_sdvo_mode_valid(struct drm_connector *connector,
 		      const struct drm_display_mode *mode)
-#endif
 {
 	struct intel_display *display = to_intel_display(connector->dev);
 	struct intel_sdvo *intel_sdvo = intel_attached_sdvo(to_intel_connector(connector));
@@ -2779,11 +2774,11 @@ static struct intel_sdvo_connector *intel_sdvo_connector_alloc(void)
 	struct intel_sdvo_connector *sdvo_connector;
 	struct intel_sdvo_connector_state *conn_state;
 
-	sdvo_connector = kzalloc(sizeof(*sdvo_connector), GFP_KERNEL);
+	sdvo_connector = kzalloc_obj(*sdvo_connector);
 	if (!sdvo_connector)
 		return NULL;
 
-	conn_state = kzalloc(sizeof(*conn_state), GFP_KERNEL);
+	conn_state = kzalloc_obj(*conn_state);
 	if (!conn_state) {
 		kfree(sdvo_connector);
 		return NULL;
@@ -3394,7 +3389,7 @@ bool intel_sdvo_init(struct intel_display *display,
 	if (!assert_sdvo_port_valid(display, port))
 		return false;
 
-	intel_sdvo = kzalloc(sizeof(*intel_sdvo), GFP_KERNEL);
+	intel_sdvo = kzalloc_obj(*intel_sdvo);
 	if (!intel_sdvo)
 		return false;
 

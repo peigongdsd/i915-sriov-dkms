@@ -12,17 +12,13 @@
 #include <drm/display/drm_dp_mst_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_client.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 #include <drm/drm_client_event.h>
-#endif
 #include <drm/drm_mode_config.h>
 #include <drm/drm_privacy_screen_consumer.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
-#include "i915_drv.h"
-#include "i915_utils.h" /* for i915_inject_probe_failure() */
 #include "i9xx_wm.h"
 #include "intel_acpi.h"
 #include "intel_atomic.h"
@@ -57,11 +53,11 @@
 #include "intel_hdcp.h"
 #include "intel_hotplug.h"
 #include "intel_hti.h"
+#include "intel_initial_plane.h"
 #include "intel_modeset_lock.h"
 #include "intel_modeset_setup.h"
 #include "intel_opregion.h"
 #include "intel_overlay.h"
-#include "intel_plane_initial.h"
 #include "intel_pmdemand.h"
 #include "intel_pps.h"
 #include "intel_psr.h"
@@ -202,11 +198,7 @@ void intel_display_driver_early_probe(struct intel_display *display)
 /* part #1: call before irq install */
 int intel_display_driver_probe_noirq(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	int ret;
-
-	if (i915_inject_probe_failure(i915))
-		return -ENODEV;
 
 	if (HAS_DISPLAY(display)) {
 		ret = drm_vblank_init(display->drm,
@@ -320,6 +312,7 @@ cleanup_bios:
 
 	return ret;
 }
+ALLOW_ERROR_INJECTION(intel_display_driver_probe_noirq, ERRNO);
 
 static void set_display_access(struct intel_display *display,
 			       bool any_task_allowed,
@@ -455,7 +448,6 @@ bool intel_display_driver_check_access(struct intel_display *display)
 /* part #2: call after irq install, but before gem init */
 int intel_display_driver_probe_nogem(struct intel_display *display)
 {
-	enum pipe pipe;
 	int ret;
 
 	if (!HAS_DISPLAY(display))
@@ -469,15 +461,9 @@ int intel_display_driver_probe_nogem(struct intel_display *display)
 
 	intel_gmbus_setup(display);
 
-	drm_dbg_kms(display->drm, "%d display pipe%s available.\n",
-		    INTEL_NUM_PIPES(display),
-		    INTEL_NUM_PIPES(display) > 1 ? "s" : "");
-
-	for_each_pipe(display, pipe) {
-		ret = intel_crtc_init(display, pipe);
-		if (ret)
-			goto err_mode_config;
-	}
+	ret = intel_crtc_init(display);
+	if (ret)
+		goto err_mode_config;
 
 	intel_plane_possible_crtcs_init(display);
 	intel_dpll_init(display);

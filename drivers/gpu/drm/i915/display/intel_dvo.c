@@ -217,13 +217,8 @@ static void intel_enable_dvo(struct intel_atomic_state *state,
 }
 
 static enum drm_mode_status
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-intel_dvo_mode_valid(struct drm_connector *_connector,
-		     struct drm_display_mode *mode)
-#else
 intel_dvo_mode_valid(struct drm_connector *_connector,
 		     const struct drm_display_mode *mode)
-#endif
 {
 	struct intel_display *display = to_intel_display(_connector->dev);
 	struct intel_connector *connector = to_intel_connector(_connector);
@@ -499,7 +494,7 @@ void intel_dvo_init(struct intel_display *display)
 	struct intel_encoder *encoder;
 	struct intel_dvo *intel_dvo;
 
-	intel_dvo = kzalloc(sizeof(*intel_dvo), GFP_KERNEL);
+	intel_dvo = kzalloc_obj(*intel_dvo);
 	if (!intel_dvo)
 		return;
 

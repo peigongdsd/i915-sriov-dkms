@@ -3,29 +3,19 @@
 
 subdir-ccflags-y += -include $(src)/export.h
 
-intel_sriov_compat-y += v6.13/drm_print.o \
-			v6.13/hrtimer.o
-
-intel_sriov_compat-y += v6.14/drm_dp_helper.o \
-			v6.14/drm_print.o \
-			v6.14/ttm_bo_vm.o
-
-intel_sriov_compat-y += v6.15/drm_dp_helper.o \
-			v6.15/drm_managed.o \
-			v6.15/migrate_device.o
-
-intel_sriov_compat-y += v6.16/drm_dp_helper.o
-
-intel_sriov_compat-y += v6.17/drm_fourcc.o
-
 intel_sriov_compat-y += v6.18/drm_gpuvm.o \
 			v6.18/drm_ttm_bo.o
 
 intel_sriov_compat-y += v6.19/drm_dp_helper.o \
 			v6.19/pci_rebar.o
 
+intel_sriov_compat-y += v7.0/dmabuf_dma_fence.o \
+			v7.0/drm_dp_helper.o \
+			v7.0/drm_sched_main.o 
+
 intel_sriov_compat-y += drm_gpusvm.o \
-			drm_pagemap.o
+			drm_pagemap.o \
+			drm_pagemap_util.o
 
 intel_sriov_compat-y += main.o
 

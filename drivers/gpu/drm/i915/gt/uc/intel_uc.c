@@ -52,10 +52,6 @@ static int __intel_uc_reset_hw(struct intel_uc *uc)
 	int ret;
 	u32 guc_status;
 
-	ret = i915_inject_probe_error(gt->i915, -ENXIO);
-	if (ret)
-		return ret;
-
 	ret = intel_reset_guc(gt);
 	if (ret) {
 		gt_err(gt, "Failed to reset GuC, ret = %d\n", ret);
@@ -220,14 +216,9 @@ static void guc_handle_mmio_msg(struct intel_guc *guc)
 static int guc_enable_communication(struct intel_guc *guc)
 {
 	struct intel_gt *gt = guc_to_gt(guc);
-	struct drm_i915_private *i915 = gt->i915;
 	int srcu, ret;
 
 	GEM_BUG_ON(intel_guc_ct_enabled(&guc->ct));
-
-	ret = i915_inject_probe_error(i915, -ENXIO);
-	if (ret)
-		return ret;
 
 	ret = gt_ggtt_address_read_lock_sync(gt, &srcu);
 	if (unlikely(ret))
@@ -327,9 +318,6 @@ static int __uc_init(struct intel_uc *uc)
 	if (!intel_uc_uses_guc(uc))
 		return 0;
 
-	if (i915_inject_probe_failure(uc_to_gt(uc)->i915))
-		return -ENOMEM;
-
 	ret = intel_guc_init(guc);
 	if (ret)
 		return ret;
@@ -342,6 +330,7 @@ static int __uc_init(struct intel_uc *uc)
 
 	return 0;
 }
+ALLOW_ERROR_INJECTION(__uc_init, ERRNO);
 
 static void __uc_fini(struct intel_uc *uc)
 {
@@ -384,10 +373,6 @@ static int uc_init_wopcm(struct intel_uc *uc)
 	GEM_BUG_ON(base & ~GUC_WOPCM_OFFSET_MASK);
 	GEM_BUG_ON(!(size & GUC_WOPCM_SIZE_MASK));
 	GEM_BUG_ON(size & ~GUC_WOPCM_SIZE_MASK);
-
-	err = i915_inject_probe_error(gt->i915, -ENXIO);
-	if (err)
-		return err;
 
 	mask = GUC_WOPCM_SIZE_MASK | GUC_WOPCM_SIZE_LOCKED;
 	err = intel_uncore_write_and_verify(uncore, GUC_WOPCM_SIZE, size, mask,

@@ -8,6 +8,7 @@
 
 #include <linux/types.h>
 
+struct drm_format_info;
 struct drm_plane;
 struct drm_property;
 struct drm_rect;
@@ -21,7 +22,8 @@ enum plane_id;
 
 struct intel_plane *
 intel_crtc_get_plane(struct intel_crtc *crtc, enum plane_id plane_id);
-bool intel_plane_can_async_flip(struct intel_plane *plane, u32 format,
+bool intel_plane_can_async_flip(struct intel_plane *plane,
+				const struct drm_format_info *info,
 				u64 modifier);
 unsigned int intel_adjusted_rate(const struct drm_rect *src,
 				 const struct drm_rect *dst,
@@ -85,10 +87,8 @@ int intel_plane_add_affected(struct intel_atomic_state *state,
 int intel_plane_atomic_check(struct intel_atomic_state *state);
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 bool intel_plane_format_mod_supported_async(struct drm_plane *plane,
 					    u32 format,
 					    u64 modifier);
-#endif
 
 #endif /* __INTEL_PLANE_H__ */

@@ -2,16 +2,31 @@
 #ifndef __BACKPORT_DMA_FENCE_H__
 #define __BACKPORT_DMA_FENCE_H__
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0) // unsafe before 6.17
-static inline const char *dma_fence_driver_name(struct dma_fence *fence)
-{
-	return fence->ops->get_driver_name(fence);
-}
 
-static inline const char *dma_fence_timeline_name(struct dma_fence *fence)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
+#define dma_fence_check_and_signal LINUX_BACKPORT(dma_fence_check_and_signal)
+bool dma_fence_check_and_signal(struct dma_fence *fence);
+#define dma_fence_check_and_signal_locked LINUX_BACKPORT(dma_fence_check_and_signal_locked)
+bool dma_fence_check_and_signal_locked(struct dma_fence *fence);
+
+/*
+ * dma_fence_test_signaled_flag - Only check whether a fence is signaled yet.
+ * @fence: the fence to check
+ *
+ * This function just checks whether @fence is signaled, without interacting
+ * with the fence in any way. The user must, therefore, ensure through other
+ * means that fences get signaled eventually.
+ *
+ * This function uses test_bit(), which is thread-safe. Naturally, this function
+ * should be used opportunistically; a fence could get signaled at any moment
+ * after the check is done.
+ *
+ * Return: true if signaled, false otherwise.
+ */
+static inline bool
+dma_fence_test_signaled_flag(struct dma_fence *fence)
 {
-	return fence->ops->get_timeline_name(fence);
+	return test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags);
 }
 #endif
-
 #endif

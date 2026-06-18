@@ -7,7 +7,7 @@
 
 static void xe_sched_process_msg_queue(struct xe_gpu_scheduler *sched)
 {
-	if (!READ_ONCE(sched->base.pause_submit))
+	if (!drm_sched_is_stopped(&sched->base))
 		queue_work(sched->base.submit_wq, &sched->work_process_msg);
 }
 
@@ -43,7 +43,7 @@ static void xe_sched_process_msg_work(struct work_struct *w)
 		container_of(w, struct xe_gpu_scheduler, work_process_msg);
 	struct xe_sched_msg *msg;
 
-	if (READ_ONCE(sched->base.pause_submit))
+	if (drm_sched_is_stopped(&sched->base))
 		return;
 
 	msg = xe_sched_get_msg(sched);
@@ -63,7 +63,6 @@ int xe_sched_init(struct xe_gpu_scheduler *sched,
 		  atomic_t *score, const char *name,
 		  struct device *dev)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	const struct drm_sched_init_args args = {
 		.ops = ops,
 		.submit_wq = submit_wq,
@@ -76,19 +75,13 @@ int xe_sched_init(struct xe_gpu_scheduler *sched,
 		.name = name,
 		.dev = dev,
 	};
-#endif
 
 	sched->ops = xe_ops;
+	spin_lock_init(&sched->msg_lock);
 	INIT_LIST_HEAD(&sched->msgs);
 	INIT_WORK(&sched->work_process_msg, xe_sched_process_msg_work);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-	return drm_sched_init(&sched->base, ops, submit_wq, 1, hw_submission,
-			      hang_limit, timeout, timeout_wq, score, name,
-			      dev);
-#else
 	return drm_sched_init(&sched->base, &args);
-#endif
 }
 
 void xe_sched_fini(struct xe_gpu_scheduler *sched)
@@ -125,7 +118,7 @@ void xe_sched_add_msg(struct xe_gpu_scheduler *sched,
 void xe_sched_add_msg_locked(struct xe_gpu_scheduler *sched,
 			     struct xe_sched_msg *msg)
 {
-	lockdep_assert_held(&sched->base.job_list_lock);
+	lockdep_assert_held(&sched->msg_lock);
 
 	list_add_tail(&msg->link, &sched->msgs);
 	xe_sched_process_msg_queue(sched);
@@ -139,7 +132,7 @@ void xe_sched_add_msg_locked(struct xe_gpu_scheduler *sched,
 void xe_sched_add_msg_head(struct xe_gpu_scheduler *sched,
 			   struct xe_sched_msg *msg)
 {
-	lockdep_assert_held(&sched->base.job_list_lock);
+	lockdep_assert_held(&sched->msg_lock);
 
 	list_add(&msg->link, &sched->msgs);
 	xe_sched_process_msg_queue(sched);

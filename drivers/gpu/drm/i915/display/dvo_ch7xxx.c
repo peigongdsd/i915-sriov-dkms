@@ -218,7 +218,7 @@ static bool ch7xxx_init(struct intel_dvo_device *dvo,
 	u8 vendor, device;
 	char *name, *devid;
 
-	ch7xxx = kzalloc(sizeof(*ch7xxx), GFP_KERNEL);
+	ch7xxx = kzalloc_obj(*ch7xxx);
 	if (ch7xxx == NULL)
 		return false;
 
@@ -277,13 +277,8 @@ static enum drm_connector_status ch7xxx_detect(struct intel_dvo_device *dvo)
 	return connector_status_disconnected;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-static enum drm_mode_status ch7xxx_mode_valid(struct intel_dvo_device *dvo,
-					      struct drm_display_mode *mode)
-#else
 static enum drm_mode_status ch7xxx_mode_valid(struct intel_dvo_device *dvo,
 					      const struct drm_display_mode *mode)
-#endif
 {
 	if (mode->clock > 165000)
 		return MODE_CLOCK_HIGH;

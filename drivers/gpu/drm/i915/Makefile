@@ -31,7 +31,10 @@ i915-y += \
 	i915_config.o \
 	i915_driver.o \
 	i915_drm_client.o \
+	i915_edram.o \
+	i915_freq.o \
 	i915_getparam.o \
+	i915_gmch.o \
 	i915_ioctl.o \
 	i915_irq.o \
 	i915_mitigations.o \
@@ -58,12 +61,6 @@ i915-y += \
 	vlv_iosf_sb.o \
 	vlv_suspend.o
 
-# core peripheral code
-i915-y += \
-	soc/intel_dram.o \
-	soc/intel_gmch.o \
-	soc/intel_rom.o
-
 # core library code
 i915-y += \
 	i915_memcpy.o \
@@ -80,6 +77,13 @@ i915-$(CONFIG_DEBUG_FS) += \
 	i915_debugfs_params.o
 i915-$(CONFIG_PERF_EVENTS) += \
 	i915_pmu.o
+
+# core display adaptation
+i915-y += \
+	i915_display_pc8.o \
+	i915_hdcp_gsc.o \
+	i915_initial_plane.o \
+	i915_panic.o
 
 # "Graphics Technology" (aka we talk to the gpu)
 gt-y += \
@@ -290,6 +294,7 @@ i915-y += \
 	display/intel_dpll_mgr.o \
 	display/intel_dpt.o \
 	display/intel_dpt_common.o \
+	display/intel_dram.o \
 	display/intel_drrs.o \
 	display/intel_dsb.o \
 	display/intel_dsb_buffer.o \
@@ -303,11 +308,11 @@ i915-y += \
 	display/intel_frontbuffer.o \
 	display/intel_global_state.o \
 	display/intel_hdcp.o \
-	display/intel_hdcp_gsc.o \
 	display/intel_hdcp_gsc_message.o \
 	display/intel_hotplug.o \
 	display/intel_hotplug_irq.o \
 	display/intel_hti.o \
+	display/intel_initial_plane.o \
 	display/intel_link_bw.o \
 	display/intel_load_detect.o \
 	display/intel_lpe_audio.o \
@@ -315,15 +320,15 @@ i915-y += \
 	display/intel_modeset_setup.o \
 	display/intel_modeset_verify.o \
 	display/intel_overlay.o \
-	display/intel_panic.o \
+	display/intel_parent.o \
 	display/intel_pch.o \
 	display/intel_pch_display.o \
 	display/intel_pch_refclk.o \
 	display/intel_plane.o \
-	display/intel_plane_initial.o \
 	display/intel_pmdemand.o \
 	display/intel_psr.o \
 	display/intel_quirks.o \
+	display/intel_rom.o \
 	display/intel_sbi.o \
 	display/intel_sprite.o \
 	display/intel_sprite_uapi.o \
@@ -399,6 +404,9 @@ i915-y += \
 
 i915-y += \
 	display/intel_dp_tunnel.o
+
+i915-$(CONFIG_DRM_I915_GVT) += \
+	display/intel_gvt_api.o
 
 i915-y += \
 	i915_perf.o

@@ -13,7 +13,6 @@
 #include <drm/ttm/ttm_tt.h>
 
 #include "xe_bo.h"
-#include "xe_gt.h"
 
 struct xe_ttm_sys_node {
 	struct ttm_buffer_object *tbo;
@@ -34,7 +33,7 @@ static int xe_ttm_sys_mgr_new(struct ttm_resource_manager *man,
 	struct xe_ttm_sys_node *node;
 	int r;
 
-	node = kzalloc(struct_size(node, base.mm_nodes, 1), GFP_KERNEL);
+	node = kzalloc_flex(*node, base.mm_nodes, 1);
 	if (!node)
 		return -ENOMEM;
 
@@ -111,10 +110,6 @@ int xe_ttm_sys_mgr_init(struct xe_device *xe)
 	/* Potentially restrict amount of TT memory here. */
 	gtt_size = (u64)si.totalram * si.mem_unit;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-	/* TTM limits allocation of all TTM devices by 50% of system memory */
-	gtt_size /= 2;
-#endif
 
 	man->use_tt = true;
 	man->func = &xe_ttm_sys_mgr_func;

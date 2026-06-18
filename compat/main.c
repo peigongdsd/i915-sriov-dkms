@@ -11,6 +11,8 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 
+void drm_pagemap_exit(void);
+
 static int __init backport_init(void)
 {
 	pr_info("intel_sriov_compat: loaded\n");
@@ -19,6 +21,7 @@ static int __init backport_init(void)
 
 static void __exit backport_exit(void)
 {
+	drm_pagemap_exit();
 }
 
 module_init(backport_init);

@@ -19,7 +19,12 @@ struct file *shmem_create_from_data(const char *name, void *data, size_t len)
 	struct file *file;
 	int err;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 	file = shmem_file_setup(name, PAGE_ALIGN(len), VM_NORESERVE);
+#else
+	file = shmem_file_setup(name, PAGE_ALIGN(len),
+				mk_vma_flags(VMA_NORESERVE_BIT));
+#endif
 	if (IS_ERR(file))
 		return file;
 
@@ -62,7 +67,7 @@ void *shmem_pin_map(struct file *file)
 	void *vaddr;
 
 	n_pages = file->f_mapping->host->i_size >> PAGE_SHIFT;
-	pages = kvmalloc_array(n_pages, sizeof(*pages), GFP_KERNEL);
+	pages = kvmalloc_objs(*pages, n_pages);
 	if (!pages)
 		return NULL;
 

@@ -11,7 +11,7 @@
 
 #include "xe_device.h"
 #include "xe_exec_queue.h"
-#include "xe_gt.h"
+#include "xe_gt_types.h"
 #include "xe_hw_engine_types.h"
 #include "xe_hw_fence.h"
 #include "xe_lrc.h"
@@ -110,15 +110,12 @@ struct xe_sched_job *xe_sched_job_create(struct xe_exec_queue *q,
 		return ERR_PTR(-ENOMEM);
 
 	job->q = q;
+	job->sample_timestamp = U64_MAX;
 	kref_init(&job->refcount);
 	xe_exec_queue_get(job->q);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-	err = drm_sched_job_init(&job->drm, q->entity, 1, NULL);
-#else
 	err = drm_sched_job_init(&job->drm, q->entity, 1, NULL,
 				 q->xef ? q->xef->drm->client_id : 0);
-#endif
 	if (err)
 		goto err_free;
 
@@ -226,15 +223,9 @@ bool xe_sched_job_started(struct xe_sched_job *job)
 	struct dma_fence *fence = dma_fence_chain_contained(job->fence);
 	struct xe_lrc *lrc = job->q->lrc[0];
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-	return !__dma_fence_is_later(xe_sched_job_lrc_seqno(job),
-				     xe_lrc_start_seqno(lrc),
-				     fence->ops);
-#else
 	return !__dma_fence_is_later(fence,
 				     xe_sched_job_lrc_seqno(job),
 				     xe_lrc_start_seqno(lrc));
-#endif
 }
 
 bool xe_sched_job_completed(struct xe_sched_job *job)
@@ -247,15 +238,9 @@ bool xe_sched_job_completed(struct xe_sched_job *job)
 	 * parallel handshake is done.
 	 */
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-	return !__dma_fence_is_later(xe_sched_job_lrc_seqno(job),
-				     xe_lrc_seqno(lrc),
-				     fence->ops);
-#else
 	return !__dma_fence_is_later(fence,
 				     xe_sched_job_lrc_seqno(job),
 				     xe_lrc_seqno(lrc));
-#endif
 }
 
 void xe_sched_job_arm(struct xe_sched_job *job)

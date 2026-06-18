@@ -200,7 +200,12 @@ static int i915_ttm_tt_shmem_populate(struct ttm_device *bdev,
 		struct address_space *mapping;
 		gfp_t mask;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 		filp = shmem_file_setup("i915-shmem-tt", size, VM_NORESERVE);
+#else
+		filp = shmem_file_setup("i915-shmem-tt", size,
+					mk_vma_flags(VMA_NORESERVE_BIT));
+#endif
 		if (IS_ERR(filp))
 			return PTR_ERR(filp);
 
@@ -278,7 +283,7 @@ static struct ttm_tt *i915_ttm_tt_create(struct ttm_buffer_object *bo,
 	if (i915_ttm_is_ghost_object(bo))
 		return NULL;
 
-	i915_tt = kzalloc(sizeof(*i915_tt), GFP_KERNEL);
+	i915_tt = kzalloc_obj(*i915_tt);
 	if (!i915_tt)
 		return NULL;
 
@@ -810,11 +815,7 @@ static int __i915_ttm_get_pages(struct drm_i915_gem_object *obj,
 	}
 
 	if (bo->ttm && !ttm_tt_is_populated(bo->ttm)) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
-		ret = ttm_tt_populate(bo->bdev, bo->ttm, &ctx);
-#else
 		ret = ttm_bo_populate(bo, &ctx);
-#endif
 		if (ret)
 			return ret;
 

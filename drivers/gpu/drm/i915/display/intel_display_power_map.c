@@ -5,13 +5,10 @@
 
 #include <drm/drm_print.h>
 
-#include "i915_drv.h"
-#include "i915_reg.h"
 // TODO: Disable display initialization on VF to align with Xe
-#ifndef _XE_I915_DRV_H_
+#ifdef I915
+#include "i915_drv.h"
 #include "i915_sriov.h"
-#else
-#include "xe_sriov.h"
 #endif
 #include "intel_display_core.h"
 #include "intel_display_power_map.h"
@@ -1831,9 +1828,8 @@ __set_power_wells(struct i915_power_domains *power_domains,
 
 	power_domains->power_well_count = power_well_count;
 	power_domains->power_wells =
-				kcalloc(power_well_count,
-					sizeof(*power_domains->power_wells),
-					GFP_KERNEL);
+				kzalloc_objs(*power_domains->power_wells,
+					     power_well_count);
 	if (!power_domains->power_wells)
 		return -ENOMEM;
 
@@ -1878,7 +1874,9 @@ int intel_display_power_map_init(struct i915_power_domains *power_domains)
 	struct intel_display *display = container_of(power_domains,
 						     struct intel_display,
 						     power.domains);
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
+#endif
 	/*
 	 * The enabling order will be from lower to higher indexed wells,
 	 * the disabling order is reversed.
@@ -1887,10 +1885,11 @@ int intel_display_power_map_init(struct i915_power_domains *power_domains)
 		power_domains->power_well_count = 0;
 		return 0;
 	}
-
+#ifdef I915
 	if (IS_SRIOV_VF(i915))
 		return set_power_wells(power_domains, i9xx_power_wells);
-	else if (DISPLAY_VERx100(display) == 3002)
+#endif
+	if (DISPLAY_VERx100(display) == 3002)
 		return set_power_wells(power_domains, wcl_power_wells);
 	else if (DISPLAY_VER(display) >= 30)
 		return set_power_wells(power_domains, xe3lpd_power_wells);

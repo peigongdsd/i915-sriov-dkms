@@ -58,13 +58,8 @@ int intel_dsi_get_modes(struct drm_connector *connector)
 	return intel_panel_get_modes(to_intel_connector(connector));
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-enum drm_mode_status intel_dsi_mode_valid(struct drm_connector *connector,
-					  struct drm_display_mode *mode)
-#else
 enum drm_mode_status intel_dsi_mode_valid(struct drm_connector *connector,
 					  const struct drm_display_mode *mode)
-#endif
 {
 	struct intel_display *display = to_intel_display(connector->dev);
 	struct intel_connector *intel_connector = to_intel_connector(connector);
@@ -92,7 +87,7 @@ struct intel_dsi_host *intel_dsi_host_init(struct intel_dsi *intel_dsi,
 	struct intel_dsi_host *host;
 	struct mipi_dsi_device *device;
 
-	host = kzalloc(sizeof(*host), GFP_KERNEL);
+	host = kzalloc_obj(*host);
 	if (!host)
 		return NULL;
 
@@ -107,7 +102,7 @@ struct intel_dsi_host *intel_dsi_host_init(struct intel_dsi *intel_dsi,
 	 * devices by ourselves here too. Need to be careful though, because we
 	 * don't initialize any of the driver model devices here.
 	 */
-	device = kzalloc(sizeof(*device), GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (!device) {
 		kfree(host);
 		return NULL;

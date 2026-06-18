@@ -287,10 +287,6 @@ static int pf_setup_home(struct drm_i915_private *i915)
 	GEM_BUG_ON(!IS_SRIOV_PF(i915));
 	GEM_BUG_ON(home);
 
-	err = i915_inject_probe_error(i915, -ENOMEM);
-	if (unlikely(err))
-		goto failed;
-
 	home = kzalloc(sizeof(*home), GFP_KERNEL);
 	if (unlikely(!home)) {
 		err = -ENOMEM;
@@ -331,10 +327,6 @@ static int pf_setup_tree(struct drm_i915_private *i915)
 	unsigned int n;
 	int err;
 
-	err = i915_inject_probe_error(i915, -ENOMEM);
-	if (unlikely(err))
-		goto failed;
-
 	kobjs = kcalloc(count, sizeof(*kobjs), GFP_KERNEL);
 	if (unlikely(!kobjs)) {
 		err = -ENOMEM;
@@ -356,10 +348,6 @@ static int pf_setup_tree(struct drm_i915_private *i915)
 			err = kobject_init_and_add(&kobj->base, &sriov_ext_ktype,
 						   &home->base, SRIOV_EXT_KOBJ_PF_NAME);
 		}
-		if (unlikely(err))
-			goto failed_kobj_n;
-
-		err = i915_inject_probe_error(i915, -EEXIST);
 		if (unlikely(err))
 			goto failed_kobj_n;
 
@@ -400,10 +388,6 @@ static int pf_setup_device_link(struct drm_i915_private *i915)
 	struct i915_sriov_pf *pf = &i915->sriov.pf;
 	struct i915_sriov_ext_kobj **kobjs = pf->sysfs.kobjs;
 	int err;
-
-	err = i915_inject_probe_error(i915, -EEXIST);
-	if (unlikely(err))
-		goto failed;
 
 	err = sysfs_create_link(&kobjs[0]->base, &i915->drm.dev->kobj, SRIOV_DEVICE_LINK_NAME);
 	if (unlikely(err))
@@ -547,21 +531,11 @@ static int pf_add_vfs_device_links(struct drm_i915_private *i915)
 
 	for (n = 1; n <= numvfs; n++) {
 
-		err = i915_inject_probe_error(i915, -ENODEV);
-		if (unlikely(err)) {
-			vf_pdev = NULL;
-			goto failed_n;
-		}
-
 		vf_pdev = pf_get_vf_pci_dev(i915, n);
 		if (unlikely(!vf_pdev)) {
 			err = -ENODEV;
 			goto failed_n;
 		}
-
-		err = i915_inject_probe_error(i915, -EEXIST);
-		if (unlikely(err))
-			goto failed_n;
 
 		err = sysfs_create_link(&kobjs[n]->base, &vf_pdev->dev.kobj,
 					SRIOV_DEVICE_LINK_NAME);

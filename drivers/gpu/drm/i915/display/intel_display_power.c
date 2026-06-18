@@ -8,10 +8,10 @@
 
 #include <drm/drm_print.h>
 
-#include "soc/intel_dram.h"
-
+// TODO: Disable display initialization on VF to align with Xe
+#ifdef I915
 #include "i915_drv.h"
-#include "i915_irq.h"
+#endif
 #include "i915_reg.h"
 #include "intel_backlight_regs.h"
 #include "intel_cdclk.h"
@@ -26,12 +26,15 @@
 #include "intel_display_types.h"
 #include "intel_display_utils.h"
 #include "intel_dmc.h"
+#include "intel_dram.h"
 #include "intel_mchbar_regs.h"
+#include "intel_parent.h"
 #include "intel_pch_refclk.h"
 #include "intel_pcode.h"
 #include "intel_pmdemand.h"
 #include "intel_pps_regs.h"
 #include "intel_snps_phy.h"
+#include "intel_step.h"
 #include "skl_watermark.h"
 #include "skl_watermark_regs.h"
 #include "vlv_sideband.h"
@@ -545,8 +548,8 @@ __intel_display_power_get_domain(struct intel_display *display,
  * Any power domain reference obtained by this function must have a symmetric
  * call to intel_display_power_put() to release the reference again.
  */
-intel_wakeref_t intel_display_power_get(struct intel_display *display,
-					enum intel_display_power_domain domain)
+struct ref_tracker *intel_display_power_get(struct intel_display *display,
+					    enum intel_display_power_domain domain)
 {
 	struct i915_power_domains *power_domains = &display->power.domains;
 	struct ref_tracker *wakeref;
@@ -572,7 +575,7 @@ intel_wakeref_t intel_display_power_get(struct intel_display *display,
  * Any power domain reference obtained by this function must have a symmetric
  * call to intel_display_power_put() to release the reference again.
  */
-intel_wakeref_t
+struct ref_tracker *
 intel_display_power_get_if_enabled(struct intel_display *display,
 				   enum intel_display_power_domain domain)
 {
@@ -639,7 +642,7 @@ static void __intel_display_power_put(struct intel_display *display,
 
 static void
 queue_async_put_domains_work(struct i915_power_domains *power_domains,
-			     intel_wakeref_t wakeref,
+			     struct ref_tracker *wakeref,
 			     int delay_ms)
 {
 	struct intel_display *display = container_of(power_domains,
@@ -741,7 +744,7 @@ out_verify:
  */
 void __intel_display_power_put_async(struct intel_display *display,
 				     enum intel_display_power_domain domain,
-				     intel_wakeref_t wakeref,
+				     struct ref_tracker *wakeref,
 				     int delay_ms)
 {
 	struct i915_power_domains *power_domains = &display->power.domains;
@@ -800,7 +803,7 @@ void intel_display_power_flush_work(struct intel_display *display)
 {
 	struct i915_power_domains *power_domains = &display->power.domains;
 	struct intel_power_domain_mask async_put_mask;
-	intel_wakeref_t work_wakeref;
+	struct ref_tracker *work_wakeref;
 
 	mutex_lock(&power_domains->lock);
 
@@ -854,7 +857,7 @@ intel_display_power_flush_work_sync(struct intel_display *display)
  */
 void intel_display_power_put(struct intel_display *display,
 			     enum intel_display_power_domain domain,
-			     intel_wakeref_t wakeref)
+			     struct ref_tracker *wakeref)
 {
 	__intel_display_power_put(display, domain);
 	intel_display_rpm_put(display, wakeref);
@@ -886,7 +889,7 @@ intel_display_power_get_in_set(struct intel_display *display,
 			       struct intel_display_power_domain_set *power_domain_set,
 			       enum intel_display_power_domain domain)
 {
-	intel_wakeref_t __maybe_unused wf;
+	struct ref_tracker *__maybe_unused wf;
 
 	drm_WARN_ON(display->drm, test_bit(domain, power_domain_set->mask.bits));
 
@@ -902,7 +905,7 @@ intel_display_power_get_in_set_if_enabled(struct intel_display *display,
 					  struct intel_display_power_domain_set *power_domain_set,
 					  enum intel_display_power_domain domain)
 {
-	intel_wakeref_t wf;
+	struct ref_tracker *wf;
 
 	drm_WARN_ON(display->drm, test_bit(domain, power_domain_set->mask.bits));
 
@@ -929,7 +932,7 @@ intel_display_power_put_mask_in_set(struct intel_display *display,
 		    !bitmap_subset(mask->bits, power_domain_set->mask.bits, POWER_DOMAIN_NUM));
 
 	for_each_power_domain(domain, mask) {
-		intel_wakeref_t __maybe_unused wf = INTEL_WAKEREF_DEF;
+		struct ref_tracker *__maybe_unused wf = INTEL_WAKEREF_DEF;
 
 #if IS_ENABLED(CONFIG_DRM_I915_DEBUG_RUNTIME_PM)
 		wf = fetch_and_zero(&power_domain_set->wakerefs[domain]);
@@ -1202,7 +1205,6 @@ static void hsw_assert_cdclk(struct intel_display *display)
 
 static void assert_can_disable_lcpll(struct intel_display *display)
 {
-	struct drm_i915_private *dev_priv = to_i915(display->drm);
 	struct intel_crtc *crtc;
 
 	for_each_intel_crtc(display->drm, crtc)
@@ -1247,7 +1249,7 @@ static void assert_can_disable_lcpll(struct intel_display *display)
 	 * gen-specific and since we only disable LCPLL after we fully disable
 	 * the interrupts, the check below should be enough.
 	 */
-	INTEL_DISPLAY_STATE_WARN(display, intel_irqs_enabled(dev_priv),
+	INTEL_DISPLAY_STATE_WARN(display, intel_parent_irq_enabled(display),
 				 "IRQs enabled\n");
 }
 
@@ -1330,7 +1332,6 @@ static void hsw_disable_lcpll(struct intel_display *display,
  */
 static void hsw_restore_lcpll(struct intel_display *display)
 {
-	struct drm_i915_private __maybe_unused *dev_priv = to_i915(display->drm);
 	u32 val;
 	int ret;
 
@@ -1341,10 +1342,10 @@ static void hsw_restore_lcpll(struct intel_display *display)
 		return;
 
 	/*
-	 * Make sure we're not on PC8 state before disabling PC8, otherwise
-	 * we'll hang the machine. To prevent PC8 state, just enable force_wake.
+	 * Make sure we're not on PC8 state before disabling
+	 * PC8, otherwise we'll hang the machine.
 	 */
-	intel_uncore_forcewake_get(&dev_priv->uncore, FORCEWAKE_ALL);
+	intel_parent_pc8_block(display);
 
 	if (val & LCPLL_POWER_DOWN_ALLOW) {
 		val &= ~LCPLL_POWER_DOWN_ALLOW;
@@ -1374,7 +1375,7 @@ static void hsw_restore_lcpll(struct intel_display *display)
 				"Switching back to LCPLL failed\n");
 	}
 
-	intel_uncore_forcewake_put(&dev_priv->uncore, FORCEWAKE_ALL);
+	intel_parent_pc8_unblock(display);
 
 	intel_update_cdclk(display);
 	intel_cdclk_dump_config(display, &display->cdclk.hw, "Current CDCLK");
@@ -1417,8 +1418,6 @@ static void hsw_enable_pc8(struct intel_display *display)
 
 static void hsw_disable_pc8(struct intel_display *display)
 {
-	struct drm_i915_private __maybe_unused *dev_priv = to_i915(display->drm);
-
 	drm_dbg_kms(display->drm, "Disabling package C8+\n");
 
 	hsw_restore_lcpll(display);
@@ -1426,7 +1425,7 @@ static void hsw_disable_pc8(struct intel_display *display)
 
 	/* Many display registers don't survive PC8+ */
 #ifdef I915 /* FIXME */
-	intel_clock_gating_init(dev_priv);
+	intel_clock_gating_init(display->drm);
 #endif
 }
 
@@ -1618,7 +1617,7 @@ static const struct buddy_page_mask wa_1409767108_buddy_page_masks[] = {
 
 static void tgl_bw_buddy_init(struct intel_display *display)
 {
-	const struct dram_info *dram_info = intel_dram_info(display->drm);
+	const struct dram_info *dram_info = intel_dram_info(display);
 	const struct buddy_page_mask *table;
 	unsigned long abox_mask = DISPLAY_INFO(display)->abox_mask;
 	int config, i;
@@ -1945,11 +1944,14 @@ static void intel_power_domains_verify_state(struct intel_display *display);
 void intel_power_domains_init_hw(struct intel_display *display, bool resume)
 {
 	struct i915_power_domains *power_domains = &display->power.domains;
+	int is_sriov_vf = 0;
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
-
+	is_sriov_vf = IS_SRIOV_VF(i915);
+#endif
 	power_domains->initializing = true;
 
-	if (IS_SRIOV_VF(i915)) {
+	if (is_sriov_vf) {
 		  /* nop */
 	} else if (DISPLAY_VER(display) >= 11) {
 		icl_display_core_init(display, resume);
@@ -2009,7 +2011,7 @@ void intel_power_domains_init_hw(struct intel_display *display, bool resume)
  */
 void intel_power_domains_driver_remove(struct intel_display *display)
 {
-	intel_wakeref_t wakeref __maybe_unused =
+	struct ref_tracker *wakeref __maybe_unused =
 		fetch_and_zero(&display->power.domains.init_wakeref);
 
 	/* Remove the refcount we took to keep power well support disabled. */
@@ -2070,7 +2072,7 @@ void intel_power_domains_sanitize_state(struct intel_display *display)
  */
 void intel_power_domains_enable(struct intel_display *display)
 {
-	intel_wakeref_t wakeref __maybe_unused =
+	struct ref_tracker *wakeref __maybe_unused =
 		fetch_and_zero(&display->power.domains.init_wakeref);
 
 	intel_display_power_put(display, POWER_DOMAIN_INIT, wakeref);
@@ -2109,7 +2111,7 @@ void intel_power_domains_disable(struct intel_display *display)
 void intel_power_domains_suspend(struct intel_display *display, bool s2idle)
 {
 	struct i915_power_domains *power_domains = &display->power.domains;
-	intel_wakeref_t wakeref __maybe_unused =
+	struct ref_tracker *wakeref __maybe_unused =
 		fetch_and_zero(&power_domains->init_wakeref);
 
 	intel_display_power_put(display, POWER_DOMAIN_INIT, wakeref);
@@ -2265,10 +2267,12 @@ static void intel_power_domains_verify_state(struct intel_display *display)
 
 void intel_display_power_suspend_late(struct intel_display *display, bool s2idle)
 {
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
 
 	if (IS_SRIOV_VF(i915))
 		return;
+#endif
 
 	intel_power_domains_suspend(display, s2idle);
 
@@ -2291,10 +2295,12 @@ void intel_display_power_suspend_late(struct intel_display *display, bool s2idle
 
 void intel_display_power_resume_early(struct intel_display *display)
 {
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
 
 	if (IS_SRIOV_VF(i915))
 		return;
+#endif
 
 	if (DISPLAY_VER(display) >= 11 || display->platform.geminilake ||
 	    display->platform.broxton) {
@@ -2314,10 +2320,12 @@ void intel_display_power_resume_early(struct intel_display *display)
 
 void intel_display_power_suspend(struct intel_display *display)
 {
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
 
 	if (IS_SRIOV_VF(i915))
 		return;
+#endif
 
 	if (DISPLAY_VER(display) >= 11) {
 		icl_display_core_uninit(display);
@@ -2333,10 +2341,12 @@ void intel_display_power_suspend(struct intel_display *display)
 void intel_display_power_resume(struct intel_display *display)
 {
 	struct i915_power_domains *power_domains = &display->power.domains;
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
 
 	if (IS_SRIOV_VF(i915))
 		return;
+#endif
 
 	if (DISPLAY_VER(display) >= 11) {
 		bxt_disable_dc9(display);

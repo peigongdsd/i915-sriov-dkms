@@ -314,7 +314,7 @@ static void *i915_gem_object_map_page(struct drm_i915_gem_object *obj,
 
 	if (n_pages > ARRAY_SIZE(stack)) {
 		/* Too big for stack -- allocate temporary array instead */
-		pages = kvmalloc_array(n_pages, sizeof(*pages), GFP_KERNEL);
+		pages = kvmalloc_objs(*pages, n_pages);
 		if (!pages)
 			return ERR_PTR(-ENOMEM);
 	}
@@ -365,7 +365,6 @@ struct intel_panic {
 	void *vaddr;
 };
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static void i915_panic_kunmap(struct intel_panic *panic)
 {
 	if (panic->vaddr) {
@@ -383,7 +382,7 @@ static struct page **i915_gem_object_panic_pages(struct drm_i915_gem_object *obj
 	struct sgt_iter iter;
 
 	/* For a 3840x2160 32 bits Framebuffer, this should require ~64K */
-	pages = kmalloc_array(n_pages, sizeof(*pages), GFP_ATOMIC);
+	pages = kmalloc_objs(*pages, n_pages, GFP_ATOMIC);
 	if (!pages)
 		return NULL;
 
@@ -433,13 +432,12 @@ static void i915_gem_object_panic_page_set_pixel(struct drm_scanout_buffer *sb, 
 		*pix = color;
 	}
 }
-#endif
 
 struct intel_panic *i915_gem_object_alloc_panic(void)
 {
 	struct intel_panic *panic;
 
-	panic = kzalloc(sizeof(*panic), GFP_KERNEL);
+	panic = kzalloc_obj(*panic);
 
 	return panic;
 }
@@ -449,7 +447,6 @@ struct intel_panic *i915_gem_object_alloc_panic(void)
  * Use current vaddr if it exists, or setup a list of pages.
  * pfn is not supported yet.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 int i915_gem_object_panic_setup(struct intel_panic *panic, struct drm_scanout_buffer *sb,
 				struct drm_gem_object *_obj, bool panic_tiling)
 {
@@ -486,7 +483,6 @@ void i915_gem_object_panic_finish(struct intel_panic *panic)
 	kfree(panic->pages);
 	panic->pages = NULL;
 }
-#endif
 
 /* get, pin, and map the pages of the object into kernel space */
 void *i915_gem_object_pin_map(struct drm_i915_gem_object *obj,

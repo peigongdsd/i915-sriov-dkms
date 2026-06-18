@@ -45,7 +45,6 @@
 #include <drm/drm_panic.h>
 #include <drm/drm_print.h>
 
-#include "gem/i915_gem_object.h"
 #include "i9xx_plane_regs.h"
 #include "intel_cdclk.h"
 #include "intel_cursor.h"
@@ -56,7 +55,7 @@
 #include "intel_fb.h"
 #include "intel_fb_pin.h"
 #include "intel_fbdev.h"
-#include "intel_panic.h"
+#include "intel_parent.h"
 #include "intel_plane.h"
 #include "intel_psr.h"
 #include "skl_scaler.h"
@@ -78,11 +77,11 @@ struct intel_plane *intel_plane_alloc(void)
 	struct intel_plane_state *plane_state;
 	struct intel_plane *plane;
 
-	plane = kzalloc(sizeof(*plane), GFP_KERNEL);
+	plane = kzalloc_obj(*plane);
 	if (!plane)
 		return ERR_PTR(-ENOMEM);
 
-	plane_state = kzalloc(sizeof(*plane_state), GFP_KERNEL);
+	plane_state = kzalloc_obj(*plane_state);
 	if (!plane_state) {
 		kfree(plane);
 		return ERR_PTR(-ENOMEM);
@@ -179,28 +178,30 @@ bool intel_plane_needs_physical(struct intel_plane *plane)
 		DISPLAY_INFO(display)->cursor_needs_physical;
 }
 
-bool intel_plane_can_async_flip(struct intel_plane *plane, u32 format,
+bool intel_plane_can_async_flip(struct intel_plane *plane,
+				const struct drm_format_info *info,
 				u64 modifier)
 {
-	if (intel_format_info_is_yuv_semiplanar(drm_format_info(format), modifier) ||
-	    format == DRM_FORMAT_C8)
+	if (intel_format_info_is_yuv_semiplanar(info, modifier) ||
+	    info->format == DRM_FORMAT_C8)
 		return false;
 
 	return plane->can_async_flip && plane->can_async_flip(modifier);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
-bool intel_plane_format_mod_supported_async(struct drm_plane *plane,
-					    u32 format,
-					    u64 modifier)
+bool intel_plane_format_mod_supported_async(struct drm_plane *_plane,
+					    u32 format, u64 modifier)
 {
-	if (!plane->funcs->format_mod_supported(plane, format, modifier))
+	struct intel_plane *plane = to_intel_plane(_plane);
+	const struct drm_format_info *info;
+
+	if (!plane->base.funcs->format_mod_supported(&plane->base, format, modifier))
 		return false;
 
-	return intel_plane_can_async_flip(to_intel_plane(plane),
-					format, modifier);
+	info = drm_get_format_info(plane->base.dev, format, modifier);
+
+	return intel_plane_can_async_flip(plane, info, modifier);
 }
-#endif
 
 unsigned int intel_adjusted_rate(const struct drm_rect *src,
 				 const struct drm_rect *dst,
@@ -320,17 +321,10 @@ static void intel_plane_clear_hw_state(struct intel_plane_state *plane_state)
 	memset(&plane_state->hw, 0, sizeof(plane_state->hw));
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-static void
-intel_plane_copy_uapi_plane_damage(struct intel_plane_state *new_plane_state,
-				   const struct intel_plane_state *old_uapi_plane_state,
-				   struct intel_plane_state *new_uapi_plane_state)
-#else
 static void
 intel_plane_copy_uapi_plane_damage(struct intel_plane_state *new_plane_state,
 				   const struct intel_plane_state *old_uapi_plane_state,
 				   const struct intel_plane_state *new_uapi_plane_state)
-#endif
 {
 	struct intel_display *display = to_intel_display(new_plane_state);
 	struct drm_rect *damage = &new_plane_state->damage;
@@ -446,10 +440,15 @@ void intel_plane_copy_hw_state(struct intel_plane_state *plane_state,
 		drm_framebuffer_get(plane_state->hw.fb);
 }
 
+static void unlink_nv12_plane(struct intel_crtc_state *crtc_state,
+			      struct intel_plane_state *plane_state);
+
 void intel_plane_set_invisible(struct intel_crtc_state *crtc_state,
 			       struct intel_plane_state *plane_state)
 {
 	struct intel_plane *plane = to_intel_plane(plane_state->uapi.plane);
+
+	unlink_nv12_plane(crtc_state, plane_state);
 
 	crtc_state->active_planes &= ~BIT(plane->id);
 	crtc_state->scaled_planes &= ~BIT(plane->id);
@@ -664,11 +663,10 @@ static int intel_plane_atomic_calc_changes(const struct intel_crtc_state *old_cr
 	    ilk_must_disable_cxsr(new_crtc_state, old_plane_state, new_plane_state))
 		new_crtc_state->disable_cxsr = true;
 
-	if (intel_plane_do_async_flip(plane, old_crtc_state, new_crtc_state)) {
+	if (intel_plane_do_async_flip(plane, old_crtc_state, new_crtc_state))
 		new_crtc_state->do_async_flip = true;
-		new_crtc_state->async_flip_planes |= BIT(plane->id);
-	} else if (plane->need_async_flip_toggle_wa &&
-		   new_crtc_state->uapi.async_flip) {
+
+	if (new_crtc_state->uapi.async_flip) {
 		/*
 		 * On platforms with double buffered async flip bit we
 		 * set the bit already one frame early during the sync
@@ -676,6 +674,9 @@ static int intel_plane_atomic_calc_changes(const struct intel_crtc_state *old_cr
 		 * hardware will therefore be ready to perform a real
 		 * async flip during the next commit, without having
 		 * to wait yet another frame for the bit to latch.
+		 *
+		 * async_flip_planes bitmask is also used by selective
+		 * fetch calculation to choose full frame update.
 		 */
 		new_crtc_state->async_flip_planes |= BIT(plane->id);
 	}
@@ -772,11 +773,7 @@ static int plane_atomic_check(struct intel_atomic_state *state,
 		intel_atomic_get_new_plane_state(state, plane);
 	const struct intel_plane_state *old_plane_state =
 		intel_atomic_get_old_plane_state(state, plane);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-	struct intel_plane_state *new_primary_crtc_plane_state;
-#else
 	const struct intel_plane_state *new_primary_crtc_plane_state;
-#endif
 	const struct intel_plane_state *old_primary_crtc_plane_state;
 	struct intel_crtc *crtc = intel_crtc_for_pipe(display, plane->pipe);
 	const struct intel_crtc_state *old_crtc_state =
@@ -1252,8 +1249,7 @@ intel_prepare_plane_fb(struct drm_plane *_plane,
 		goto unpin_fb;
 
 	if (new_plane_state->uapi.fence) {
-		i915_gem_fence_wait_priority_display(new_plane_state->uapi.fence);
-
+		intel_parent_fence_priority_display(display, new_plane_state->uapi.fence);
 		intel_display_rps_boost_after_vblank(new_plane_state->hw.crtc,
 						     new_plane_state->uapi.fence);
 	}
@@ -1302,7 +1298,6 @@ intel_cleanup_plane_fb(struct drm_plane *plane,
 	intel_plane_unpin_fb(old_plane_state);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 /* Handle Y-tiling, only if DPT is enabled (otherwise disabling tiling is easier)
  * All DPT hardware have 128-bytes width tiling, so Y-tile dimension is 32x32
  * pixels for 32bits pixels.
@@ -1349,33 +1344,33 @@ static unsigned int intel_4tile_get_offset(unsigned int width, unsigned int x, u
 }
 
 
-static void intel_panic_flush(struct drm_plane *plane)
+static void intel_panic_flush(struct drm_plane *_plane)
 {
-	struct intel_plane_state *plane_state = to_intel_plane_state(plane->state);
-	struct intel_crtc_state *crtc_state = to_intel_crtc_state(plane->state->crtc->state);
-	struct intel_plane *iplane = to_intel_plane(plane);
-	struct intel_display *display = to_intel_display(iplane);
-	struct drm_framebuffer *fb = plane_state->hw.fb;
-	struct intel_framebuffer *intel_fb = to_intel_framebuffer(fb);
+	struct intel_plane *plane = to_intel_plane(_plane);
+	struct intel_display *display = to_intel_display(plane);
+	const struct intel_plane_state *plane_state = to_intel_plane_state(plane->base.state);
+	struct intel_crtc *crtc = to_intel_crtc(plane_state->hw.crtc);
+	const struct intel_crtc_state *crtc_state = to_intel_crtc_state(crtc->base.state);
+	const struct intel_framebuffer *fb = to_intel_framebuffer(plane_state->hw.fb);
 
-	intel_panic_finish(intel_fb->panic);
+	intel_parent_panic_finish(display, fb->panic);
 
 	if (crtc_state->enable_psr2_sel_fetch) {
 		/* Force a full update for psr2 */
-		intel_psr2_panic_force_full_update(display, crtc_state);
+		intel_psr2_panic_force_full_update(crtc_state);
 	}
 
 	/* Flush the cache and don't disable tiling if it's the fbdev framebuffer.*/
-	if (intel_fb == intel_fbdev_framebuffer(display->fbdev.fbdev)) {
+	if (fb == intel_fbdev_framebuffer(display->fbdev.fbdev)) {
 		struct iosys_map map;
 
 		intel_fbdev_get_map(display->fbdev.fbdev, &map);
-		drm_clflush_virt_range(map.vaddr, fb->pitches[0] * fb->height);
+		drm_clflush_virt_range(map.vaddr, fb->base.pitches[0] * fb->base.height);
 		return;
 	}
 
-	if (fb->modifier && iplane->disable_tiling)
-		iplane->disable_tiling(iplane);
+	if (fb->base.modifier != DRM_FORMAT_MOD_LINEAR && plane->disable_tiling)
+		plane->disable_tiling(plane);
 }
 
 static unsigned int (*intel_get_tiling_func(u64 fb_modifier))(unsigned int width,
@@ -1413,70 +1408,59 @@ static int intel_get_scanout_buffer(struct drm_plane *plane,
 {
 	struct intel_plane_state *plane_state;
 	struct drm_gem_object *obj;
-	struct drm_framebuffer *fb;
-	struct intel_framebuffer *intel_fb;
+	struct intel_framebuffer *fb;
 	struct intel_display *display = to_intel_display(plane->dev);
 
 	if (!plane->state || !plane->state->fb || !plane->state->visible)
 		return -ENODEV;
 
 	plane_state = to_intel_plane_state(plane->state);
-	fb = plane_state->hw.fb;
-	intel_fb = to_intel_framebuffer(fb);
+	fb = to_intel_framebuffer(plane_state->hw.fb);
 
-	obj = intel_fb_bo(fb);
+	obj = intel_fb_bo(&fb->base);
 	if (!obj)
 		return -ENODEV;
 
-	if (intel_fb == intel_fbdev_framebuffer(display->fbdev.fbdev)) {
+	if (fb == intel_fbdev_framebuffer(display->fbdev.fbdev)) {
 		intel_fbdev_get_map(display->fbdev.fbdev, &sb->map[0]);
 	} else {
 		int ret;
 		/* Can't disable tiling if DPT is in use */
-		if (intel_fb_uses_dpt(fb)) {
-			if (fb->format->cpp[0] != 4)
+		if (intel_fb_uses_dpt(&fb->base)) {
+			if (fb->base.format->cpp[0] != 4)
 				return -EOPNOTSUPP;
-			intel_fb->panic_tiling = intel_get_tiling_func(fb->modifier);
-			if (!intel_fb->panic_tiling)
+			fb->panic_tiling = intel_get_tiling_func(fb->base.modifier);
+			if (!fb->panic_tiling)
 				return -EOPNOTSUPP;
 		}
-		sb->private = intel_fb;
-		ret = intel_panic_setup(intel_fb->panic, sb);
+		sb->private = fb;
+		ret = intel_parent_panic_setup(display, fb->panic, sb);
 		if (ret)
 			return ret;
 	}
-	sb->width = fb->width;
-	sb->height = fb->height;
+	sb->width = fb->base.width;
+	sb->height = fb->base.height;
 	/* Use the generic linear format, because tiling, RC, CCS, CC
 	 * will be disabled in disable_tiling()
 	 */
-	sb->format = drm_format_info(fb->format->format);
-	sb->pitch[0] = fb->pitches[0];
+	sb->format = drm_format_info(fb->base.format->format);
+	sb->pitch[0] = fb->base.pitches[0];
 
 	return 0;
 }
-#endif
 
 static const struct drm_plane_helper_funcs intel_plane_helper_funcs = {
 	.prepare_fb = intel_prepare_plane_fb,
 	.cleanup_fb = intel_cleanup_plane_fb,
 };
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static const struct drm_plane_helper_funcs intel_primary_plane_helper_funcs = {
 	.prepare_fb = intel_prepare_plane_fb,
 	.cleanup_fb = intel_cleanup_plane_fb,
 	.get_scanout_buffer = intel_get_scanout_buffer,
 	.panic_flush = intel_panic_flush,
 };
-#endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-void intel_plane_helper_add(struct intel_plane *plane)
-{
-	drm_plane_helper_add(&plane->base, &intel_plane_helper_funcs);
-}
-#else
 void intel_plane_helper_add(struct intel_plane *plane)
 {
 	if (plane->base.type == DRM_PLANE_TYPE_PRIMARY)
@@ -1484,7 +1468,6 @@ void intel_plane_helper_add(struct intel_plane *plane)
 	else
 		drm_plane_helper_add(&plane->base, &intel_plane_helper_funcs);
 }
-#endif
 
 void intel_plane_init_cursor_vblank_work(struct intel_plane_state *old_plane_state,
 					 struct intel_plane_state *new_plane_state)
@@ -1493,7 +1476,7 @@ void intel_plane_init_cursor_vblank_work(struct intel_plane_state *old_plane_sta
 	    old_plane_state->ggtt_vma == new_plane_state->ggtt_vma)
 		return;
 
-	drm_vblank_work_init(&old_plane_state->unpin_work, old_plane_state->uapi.crtc,
+	drm_vblank_work_init(&old_plane_state->unpin_work, old_plane_state->hw.crtc,
 			     intel_cursor_unpin_work);
 }
 
@@ -1540,6 +1523,9 @@ static void unlink_nv12_plane(struct intel_crtc_state *crtc_state,
 	struct intel_display *display = to_intel_display(plane_state);
 	struct intel_plane *plane = to_intel_plane(plane_state->uapi.plane);
 
+	if (!plane_state->planar_linked_plane)
+		return;
+
 	plane_state->planar_linked_plane = NULL;
 
 	if (!plane_state->is_y_plane)
@@ -1577,8 +1563,7 @@ static int icl_check_nv12_planes(struct intel_atomic_state *state,
 		if (plane->pipe != crtc->pipe)
 			continue;
 
-		if (plane_state->planar_linked_plane)
-			unlink_nv12_plane(crtc_state, plane_state);
+		unlink_nv12_plane(crtc_state, plane_state);
 	}
 
 	if (!crtc_state->nv12_planes)

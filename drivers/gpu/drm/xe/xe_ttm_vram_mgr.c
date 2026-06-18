@@ -12,7 +12,6 @@
 
 #include "xe_bo.h"
 #include "xe_device.h"
-#include "xe_gt.h"
 #include "xe_res_cursor.h"
 #include "xe_ttm_vram_mgr.h"
 #include "xe_vram_types.h"
@@ -65,7 +64,7 @@ static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
 	if (tbo->base.size >> PAGE_SHIFT > (lpfn - place->fpfn))
 		return -E2BIG; /* don't trigger eviction for the impossible */
 
-	vres = kzalloc(sizeof(*vres), GFP_KERNEL);
+	vres = kzalloc_obj(*vres);
 	if (!vres)
 		return -ENOMEM;
 
@@ -313,14 +312,12 @@ int __xe_ttm_vram_mgr_init(struct xe_device *xe, struct xe_ttm_vram_mgr *mgr,
 	struct ttm_resource_manager *man = &mgr->manager;
 	int err;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
 	if (mem_type != XE_PL_STOLEN) {
 		const char *name = mem_type == XE_PL_VRAM0 ? "vram0" : "vram1";
 		man->cg = drmm_cgroup_register_region(&xe->drm, name, size);
 		if (IS_ERR(man->cg))
 			return PTR_ERR(man->cg);
 	}
-#endif
 
 	man->func = &xe_ttm_vram_mgr_func;
 	mgr->mem_type = mem_type;
@@ -374,7 +371,7 @@ int xe_ttm_vram_mgr_alloc_sgt(struct xe_device *xe,
 	if (vres->used_visible_size < res->size)
 		return -EOPNOTSUPP;
 
-	*sgt = kmalloc(sizeof(**sgt), GFP_KERNEL);
+	*sgt = kmalloc_obj(**sgt);
 	if (!*sgt)
 		return -ENOMEM;
 

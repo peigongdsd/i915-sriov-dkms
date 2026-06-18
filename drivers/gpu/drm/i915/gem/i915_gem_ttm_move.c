@@ -498,7 +498,7 @@ __i915_ttm_move(struct ttm_buffer_object *bo,
 		struct dma_fence *dep = fence;
 
 		if (!I915_SELFTEST_ONLY(fail_work_allocation))
-			copy_work = kzalloc(sizeof(*copy_work), GFP_KERNEL);
+			copy_work = kzalloc_obj(*copy_work);
 
 		if (copy_work) {
 			copy_work->i915 = i915;
@@ -624,11 +624,7 @@ int i915_ttm_move(struct ttm_buffer_object *bo, bool evict,
 
 	/* Populate ttm with pages if needed. Typically system memory. */
 	if (ttm && (dst_man->use_tt || (ttm->page_flags & TTM_TT_FLAG_SWAPPED))) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
-		ret = ttm_tt_populate(bo->bdev, ttm, ctx);
-#else
 		ret = ttm_bo_populate(bo, ctx);
-#endif
 		if (ret)
 			return ret;
 	}

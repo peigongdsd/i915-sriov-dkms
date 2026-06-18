@@ -1,7 +1,7 @@
 # Maintainer: Xilin Wu <strongtz@yeah.net>
 
 pkgname=i915-sriov-dkms
-pkgver=2026.03.05
+pkgver=2026.05.06
 pkgrel=1
 pkgdesc="Linux i915 module patched with SR-IOV support"
 arch=('x86_64')
@@ -21,5 +21,6 @@ package() {
   echo "* Copying module into /usr/src..."
   install -dm755 "${pkgdir}/usr/src/${pkgname}-${pkgver}"
   cp -r {compat,dkms.conf,drivers,include,Makefile} "${pkgdir}/usr/src/${pkgname}-${pkgver}"
+  install -Dm755 conftest.sh "${pkgdir}/usr/src/${pkgname}-${pkgver}/conftest.sh"
   install -Dm644 i915-set-sriov-numvfs.conf "${pkgdir}/etc/tmpfiles.d/i915-set-sriov-numvfs.conf"
 }

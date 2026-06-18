@@ -1,4 +1,4 @@
-# Linux i915 and xe driver (dkms module) with SR-IOV support for linux 6.12 ~ 6.19
+# Linux i915 and xe driver (dkms module) with SR-IOV support for linux
 
 This repo is a code snapshot of the i915 and xe modules from the mainline linux kernel with SR-IOV support ported from the [intel/mainline-tracking.git](https://github.com/intel/mainline-tracking.git)
 
@@ -13,13 +13,19 @@ You need to install this dkms module in **both host and guest!**
 
 ## Required kernel
 
-Required kernel: **6.12.x ~ 6.19.x**
+**Required kernel**: 6.17.x ~ 7.0.x
 
-For older kernel (v6.8 ~ v6.12), please use the [2025.07.22](https://github.com/strongtz/i915-sriov-dkms/releases/tag/2025.07.22) release.
+**Latest release**: [2026.05.06](https://github.com/strongtz/i915-sriov-dkms/releases/tag/2026.05.06)
+
+For older kernel (v6.12 ~ v6.19), please use the [2026.03.05.1](https://github.com/strongtz/i915-sriov-dkms/releases/tag/2026.03.05.1) release.
+
+For v6.8 ~ v6.12, please use the [2025.07.22](https://github.com/strongtz/i915-sriov-dkms/releases/tag/2025.07.22) release.
 
 For v6.1 ~ v6.7, please use [intel-lts-v6.1](https://github.com/strongtz/i915-sriov-dkms/tree/intel-lts-v6.1) branch instead.
 
 It is recommended that to upgrade to a supported kernel, the older branches will no longer be maintained.
+
+**Note**: The Host and Guest VM are not strictly required to use the same module version.
 
 **Note on Secure Boot:** Loading out-of-tree kernel modules requires Secure Boot to be disabled. If you require Secure Boot, ensure you are using a signed kernel and follow the instructions in the [UEFI Secure Boot Enabled Configuration](docs/secure-boot.md) guide to sign the module.
 
@@ -81,11 +87,11 @@ For detailed installation instructions, please refer to the specific guide for y
 ### Host Installation
 - [Arch Linux Host](docs/install-arch-host.md)
 - [NixOS Linux Host (Tested Kernel 6.17)](docs/install-nixos-host.md)
-- [Proxmox PVE Host (PVE 9.1)](docs/install-pve-host.md)
+- [Proxmox PVE Host](docs/install-pve-host.md)
 - [Manual Host Installation Steps](docs/install-manual.md) - Applicable to Debian, Ubuntu, and Arch Linux hosts.
 
 ### Guest Installation
-- [Linux Guest (Ubuntu 25.04/Kernel 6.14)](docs/install-linux-guest.md)
+- [Linux Guest (Ubuntu)](docs/install-linux-guest.md)
 - [Linux Guest (Ubuntu 25.04 Cloud-Init VM on Proxmox)](docs/install-linux-guest-proxmox-cloud-init.md)
 - [Windows Guest (Tested with Proxmox 8.3 + Windows 11 24H2 + Intel Driver 32.0.101.6460/32.0.101.6259)](docs/install-windows-guest.md)
 

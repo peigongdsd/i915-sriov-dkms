@@ -143,7 +143,7 @@ static bool sil164_init(struct intel_dvo_device *dvo,
 	struct sil164_priv *sil;
 	unsigned char ch;
 
-	sil = kzalloc(sizeof(*sil), GFP_KERNEL);
+	sil = kzalloc_obj(*sil);
 	if (sil == NULL)
 		return false;
 
@@ -190,13 +190,8 @@ static enum drm_connector_status sil164_detect(struct intel_dvo_device *dvo)
 		return connector_status_disconnected;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
-static enum drm_mode_status sil164_mode_valid(struct intel_dvo_device *dvo,
-					      struct drm_display_mode *mode)
-#else
 static enum drm_mode_status sil164_mode_valid(struct intel_dvo_device *dvo,
 					      const struct drm_display_mode *mode)
-#endif
 {
 	return MODE_OK;
 }

@@ -1670,9 +1670,7 @@ static void i915_oa_stream_destroy(struct i915_perf_stream *stream)
 	struct i915_perf *perf = stream->perf;
 	struct intel_gt *gt = stream->engine->gt;
 	struct i915_perf_group *g = stream->engine->oa_group;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 	int m;
-#endif
 
 	if (WARN_ON(stream != g->exclusive_stream))
 		return;
@@ -1697,16 +1695,9 @@ static void i915_oa_stream_destroy(struct i915_perf_stream *stream)
 	free_oa_configs(stream);
 	free_noa_wait(stream);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
-	if (perf->spurious_report_rs.missed) {
-		gt_notice(gt, "%d spurious OA report notices suppressed due to ratelimiting\n",
-			  perf->spurious_report_rs.missed);
-	}
-#else
 	m = ratelimit_state_get_miss(&perf->spurious_report_rs);
 	if (m)
 		gt_notice(gt, "%d spurious OA report notices suppressed due to ratelimiting\n", m);
-#endif
 }
 
 static void gen7_init_oa_buffer(struct i915_perf_stream *stream)
@@ -2212,7 +2203,7 @@ alloc_oa_config_buffer(struct i915_perf_stream *stream,
 	u32 *cs;
 	int err;
 
-	oa_bo = kzalloc(sizeof(*oa_bo), GFP_KERNEL);
+	oa_bo = kzalloc_obj(*oa_bo);
 	if (!oa_bo)
 		return ERR_PTR(-ENOMEM);
 
@@ -3887,7 +3878,7 @@ i915_perf_open_ioctl_locked(struct i915_perf *perf,
 		goto err_ctx;
 	}
 
-	stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+	stream = kzalloc_obj(*stream);
 	if (!stream) {
 		ret = -ENOMEM;
 		goto err_ctx;
@@ -4520,7 +4511,7 @@ static struct i915_oa_reg *alloc_oa_regs(struct i915_perf *perf,
 	if (!is_valid)
 		return ERR_PTR(-EINVAL);
 
-	oa_regs = kmalloc_array(n_regs, sizeof(*oa_regs), GFP_KERNEL);
+	oa_regs = kmalloc_objs(*oa_regs, n_regs);
 	if (!oa_regs)
 		return ERR_PTR(-ENOMEM);
 
@@ -4629,7 +4620,7 @@ int i915_perf_add_config_ioctl(struct drm_device *dev, void *data,
 		return -EINVAL;
 	}
 
-	oa_config = kzalloc(sizeof(*oa_config), GFP_KERNEL);
+	oa_config = kzalloc_obj(*oa_config);
 	if (!oa_config) {
 		drm_dbg(&perf->i915->drm,
 			"Failed to allocate memory for the OA config\n");
@@ -4810,11 +4801,7 @@ err_unlock:
 	return ret;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
-static struct ctl_table oa_table[] = {
-#else
 static const struct ctl_table oa_table[] = {
-#endif
 	{
 	 .procname = "perf_stream_paranoid",
 	 .data = &i915_perf_stream_paranoid,
@@ -4929,7 +4916,7 @@ static int oa_init_gt(struct intel_gt *gt)
 	struct i915_perf_group *g;
 	intel_engine_mask_t tmp;
 
-	g = kcalloc(num_groups, sizeof(*g), GFP_KERNEL);
+	g = kzalloc_objs(*g, num_groups);
 	if (!g)
 		return -ENOMEM;
 

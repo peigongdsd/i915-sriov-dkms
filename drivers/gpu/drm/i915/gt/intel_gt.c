@@ -708,10 +708,6 @@ int intel_gt_init(struct intel_gt *gt)
 {
 	int err;
 
-	err = i915_inject_probe_error(gt->i915, -ENODEV);
-	if (err)
-		return err;
-
 	intel_gt_init_workarounds(gt);
 
 	/*
@@ -770,10 +766,6 @@ int intel_gt_init(struct intel_gt *gt)
 	if (err)
 		goto err_gt;
 
-	err = i915_inject_probe_error(gt->i915, -EIO);
-	if (err)
-		goto err_gt;
-
 	intel_uc_init_late(&gt->uc);
 
 	intel_migrate_init(&gt->migrate, gt);
@@ -798,6 +790,7 @@ out_fw:
 	intel_uncore_forcewake_put(gt->uncore, FORCEWAKE_ALL);
 	return err;
 }
+ALLOW_ERROR_INJECTION(intel_gt_init, ERRNO);
 
 void intel_gt_driver_remove(struct intel_gt *gt)
 {

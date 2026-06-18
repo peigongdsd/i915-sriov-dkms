@@ -20,7 +20,7 @@
 #include "intel_fb.h"
 #include "intel_fb_bo.h"
 #include "intel_frontbuffer.h"
-#include "intel_panic.h"
+#include "intel_parent.h"
 #include "intel_plane.h"
 
 #define check_array_bounds(display, a, i) drm_WARN_ON((display)->drm, (i) >= ARRAY_SIZE(a))
@@ -422,27 +422,6 @@ unsigned int intel_fb_modifier_to_tiling(u64 fb_modifier)
 	}
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-/**
- * intel_fb_get_format_info: Get a modifier specific format information
- * @cmd: FB add command structure
-
- *
- * Returns:
- * Returns the format information for @cmd->pixel_format specific to @cmd->modifier[0],
- * or %NULL if the modifier doesn't override the format.
- */
-const struct drm_format_info *
-intel_fb_get_format_info(const struct drm_mode_fb_cmd2 *cmd)
-{
-	const struct intel_modifier_desc *md = lookup_modifier_or_null(cmd->modifier[0]);
-
-	if (!md || !md->formats)
-		return NULL;
-
-	return lookup_format_info(md->formats, md->format_count, cmd->pixel_format);
-}
-#else
 /**
  * intel_fb_get_format_info: Get a modifier specific format information
  * @pixel_format: pixel format
@@ -462,7 +441,6 @@ intel_fb_get_format_info(u32 pixel_format, u64 modifier)
 
 	return lookup_format_info(md->formats, md->format_count, pixel_format);
 }
-#endif
 
 static bool plane_caps_contain_any(u8 caps, u8 mask)
 {
@@ -580,7 +558,7 @@ static bool plane_has_modifier(struct intel_display *display,
 	 * where supported.
 	 */
 	if (intel_fb_is_ccs_modifier(md->modifier) &&
-	    HAS_AUX_CCS(display) != !!md->ccs.packed_aux_planes)
+	    intel_parent_has_auxccs(display) != !!md->ccs.packed_aux_planes)
 		return false;
 
 	if (md->modifier == I915_FORMAT_MOD_4_TILED_BMG_CCS &&
@@ -2195,7 +2173,7 @@ static int intel_user_framebuffer_dirty(struct drm_framebuffer *fb,
 	if (ret || !fence)
 		goto flush;
 
-	cb = kmalloc(sizeof(*cb), GFP_KERNEL);
+	cb = kmalloc_obj(*cb);
 	if (!cb) {
 		dma_fence_put(fence);
 		ret = -ENOMEM;
@@ -2238,11 +2216,9 @@ int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
 	int ret;
 	int i;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
-	intel_fb->panic = intel_panic_alloc();
+	intel_fb->panic = intel_parent_panic_alloc(display);
 	if (!intel_fb->panic)
 		return -ENOMEM;
-#endif
 
 	/*
 	 * intel_frontbuffer_get() must be done before
@@ -2288,11 +2264,7 @@ int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
 		goto err_bo_framebuffer_fini;
 	}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-	drm_helper_mode_fill_fb_struct(display->drm, fb, mode_cmd);
-#else
 	drm_helper_mode_fill_fb_struct(display->drm, fb, info, mode_cmd);
-#endif
 
 
 	for (i = 0; i < fb->format->num_planes; i++) {
@@ -2366,18 +2338,11 @@ err_free_panic:
 	return ret;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-struct drm_framebuffer *
-intel_user_framebuffer_create(struct drm_device *dev,
-			      struct drm_file *filp,
-			      const struct drm_mode_fb_cmd2 *user_mode_cmd)
-#else
 struct drm_framebuffer *
 intel_user_framebuffer_create(struct drm_device *dev,
 			      struct drm_file *filp,
 			      const struct drm_format_info *info,
 			      const struct drm_mode_fb_cmd2 *user_mode_cmd)
-#endif
 {
 	struct drm_framebuffer *fb;
 	struct drm_gem_object *obj;
@@ -2387,13 +2352,7 @@ intel_user_framebuffer_create(struct drm_device *dev,
 	if (IS_ERR(obj))
 		return ERR_CAST(obj);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
-	fb = intel_framebuffer_create(obj, 
-				      drm_get_format_info(dev, &mode_cmd),
-				      &mode_cmd);
-#else
 	fb = intel_framebuffer_create(obj, info, &mode_cmd);
-#endif
 	drm_gem_object_put(obj);
 
 	return fb;
@@ -2403,7 +2362,7 @@ struct intel_framebuffer *intel_framebuffer_alloc(void)
 {
 	struct intel_framebuffer *intel_fb;
 
-	intel_fb = kzalloc(sizeof(*intel_fb), GFP_KERNEL);
+	intel_fb = kzalloc_obj(*intel_fb);
 	if (!intel_fb)
 		return NULL;
 

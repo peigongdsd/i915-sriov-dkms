@@ -10,7 +10,9 @@
 #include <drm/drm_print.h>
 #include <drm/intel/pciids.h>
 
+#ifdef I915
 #include "i915_drv.h"
+#endif
 #include "i915_reg.h"
 #include "intel_cx0_phy_regs.h"
 #include "intel_de.h"
@@ -1421,6 +1423,10 @@ static const struct platform_desc ptl_desc = {
 	}
 };
 
+static const struct platform_desc nvl_desc = {
+	PLATFORM(novalake),
+};
+
 __diag_pop();
 
 /*
@@ -1496,6 +1502,7 @@ static const struct {
 	INTEL_BMG_IDS(INTEL_DISPLAY_DEVICE, &bmg_desc),
 	INTEL_PTL_IDS(INTEL_DISPLAY_DEVICE, &ptl_desc),
 	INTEL_WCL_IDS(INTEL_DISPLAY_DEVICE, &ptl_desc),
+	INTEL_NVLS_IDS(INTEL_DISPLAY_DEVICE, &nvl_desc),
 };
 
 static const struct {
@@ -1675,7 +1682,7 @@ struct intel_display *intel_display_device_probe(struct pci_dev *pdev,
 	const struct subplatform_desc *subdesc;
 	enum intel_step step;
 
-	display = kzalloc(sizeof(*display), GFP_KERNEL);
+	display = kzalloc_obj(*display);
 	if (!display)
 		return ERR_PTR(-ENOMEM);
 
@@ -1772,7 +1779,9 @@ static void __intel_display_device_info_runtime_init(struct intel_display *displ
 {
 	struct intel_display_runtime_info *display_runtime = DISPLAY_RUNTIME_INFO(display);
 	enum pipe pipe;
+#ifdef I915
 	struct drm_i915_private *i915 = to_i915(display->drm);
+#endif
 
 	BUILD_BUG_ON(BITS_PER_TYPE(display_runtime->pipe_mask) < I915_MAX_PIPES);
 	BUILD_BUG_ON(BITS_PER_TYPE(display_runtime->cpu_transcoder_mask) < I915_MAX_TRANSCODERS);
@@ -1927,11 +1936,17 @@ static void __intel_display_device_info_runtime_init(struct intel_display *displ
 		display_runtime->edp_typec_support =
 			intel_de_read(display, PICA_PHY_CONFIG_CONTROL) & EDP_ON_TYPEC;
 
+#ifndef I915
+	display_runtime->rawclk_freq = intel_read_rawclk(display);
+	drm_dbg_kms(display->drm, "rawclk rate: %d kHz\n",
+		    display_runtime->rawclk_freq);
+#else
 	if (!IS_SRIOV_VF(i915)) {
 		display_runtime->rawclk_freq = intel_read_rawclk(display);
 		drm_dbg_kms(display->drm, "rawclk rate: %d kHz\n",
 		    display_runtime->rawclk_freq);
 	}
+#endif
 
 	return;
 
