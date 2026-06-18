@@ -14,6 +14,8 @@
 #define XE_GT_SRIOV_PF_DEBUG_MAX_KLV_DWORDS	256u
 #define XE_GT_SRIOV_PF_DEBUG_SNAPSHOT_MAX_PTES	256u
 #define XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY	64u
+#define XE_GT_SRIOV_PF_DEBUG_GGTT_PAT_HISTORY	16u
+#define XE_GT_SRIOV_PF_DEBUG_CONFIG_HISTORY	16u
 
 #define XE_GT_SRIOV_PF_DEBUG_LOG_UPDATES	BIT(0)
 #define XE_GT_SRIOV_PF_DEBUG_LOG_RAW		BIT(1)
@@ -92,6 +94,20 @@ struct xe_gt_sriov_pf_ggtt_debug {
 	u64 last_final_flags_mask;
 	atomic64_t history_seq;
 	struct xe_gt_sriov_pf_ggtt_record history[XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY];
+	atomic64_t pat_history_seq[XE_GT_SRIOV_GGTT_PAT_COUNT];
+	struct xe_gt_sriov_pf_ggtt_record
+		pat_history[XE_GT_SRIOV_GGTT_PAT_COUNT][XE_GT_SRIOV_PF_DEBUG_GGTT_PAT_HISTORY];
+};
+
+struct xe_gt_sriov_pf_config_record {
+	u32 seq;
+	u64 ktime_ns;
+	s32 err;
+	s32 num_klvs;
+	u32 num_dwords;
+	u32 stored_dwords;
+	bool truncated;
+	u32 klvs[XE_GT_SRIOV_PF_DEBUG_MAX_KLV_DWORDS];
 };
 
 struct xe_gt_sriov_pf_config_debug {
@@ -107,6 +123,7 @@ struct xe_gt_sriov_pf_config_debug {
 	u32 last_err;
 	bool last_truncated;
 	u32 last_klvs[XE_GT_SRIOV_PF_DEBUG_MAX_KLV_DWORDS];
+	struct xe_gt_sriov_pf_config_record history[XE_GT_SRIOV_PF_DEBUG_CONFIG_HISTORY];
 };
 
 struct xe_gt_sriov_pf_service_debug {

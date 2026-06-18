@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "i915-sriov": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1781777605,
+        "narHash": "sha256-vSMHZ3VKGIwmibXW6p4zIX0ByFc+zOZ2YmEiAZVpyOE=",
+        "owner": "peigongdsd",
+        "repo": "i915-sriov-dkms",
+        "rev": "2c46b49ffaa63db22654dd6067052ecaf05194c4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "peigongdsd",
+        "repo": "i915-sriov-dkms",
+        "rev": "2c46b49ffaa63db22654dd6067052ecaf05194c4",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1781424514,
+        "narHash": "sha256-spaowC4+g6iHOhYo2Zpv3l5Of37+q8LKH46mZe6Iocs=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "134c6973427a26f0b8924e7bb1a2ce5a9249d903",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "134c6973427a26f0b8924e7bb1a2ce5a9249d903",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "i915-sriov": "i915-sriov",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

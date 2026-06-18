@@ -319,6 +319,121 @@ The strongest remaining areas are still policy/contract-level:
 - Whether the final GuC VF config KLV stream differs from i915 in a subtle but
   behaviorally relevant way.
 
+## Second Boot With Config Push Hook
+
+After rebuilding and booting commit `2c46b49ffaa63db22654dd6067052ecaf05194c4`,
+the VM was started and a bounded snapshot was collected at:
+
+- `trace-logs/xe-vf1-postboot-20260618-182246/`
+
+Confirmed live state:
+
+- local and booted branch: `upstream-mtl-pf-debug-trace`
+- local and booted commit: `2c46b49 xe/sriov: extend PF debug trace coverage`
+- PF `0000:00:02.0` bound to `xe`
+- VF `0000:00:02.1` bound to `vfio-pci`
+
+VF1 GT0 service counters:
+
+```text
+requests: 710
+errors: 0
+ggtt: 703
+mmio_requests: 4066
+mmio_errors: 0
+mmio_ggtt: 4066
+last_ret: 1
+```
+
+VF1 GT1 service counters:
+
+```text
+requests: 6
+errors: 0
+ggtt: 0
+mmio_requests: 0
+```
+
+VF1 GT0 GGTT counters:
+
+```text
+updates: 4769
+ptes: 535821
+errors: 0
+source_relay: 703
+source_mmio: 4066
+pat0: 2048
+pat1: 0
+pat2: 533438
+pat3: 335
+history_seq: 4769
+```
+
+The new config push hook worked: `trace_config` was no longer zero. Both GT0
+and GT1 showed:
+
+```text
+pushes: 3
+errors: 0
+last_num_klvs: 2
+{ key 0x8a0a : 32b value 0 } # begin_db_id
+{ key 0x0006 : 32b value 128 } # num_doorbells
+```
+
+This exposed a limitation in commit `2c46b49`: `trace_config` retained only the
+last KLV blob, so the earlier GGTT/context/scheduler provisioning pushes were
+overwritten by the final doorbell push. The branch was therefore extended again
+after this boot to keep a bounded config-push history ring and per-PAT GGTT
+history rings. On the next boot, `trace_config` should preserve all three
+provisioning pushes and `trace_ggtt` should preserve rare PAT0/PAT3 update
+ranges even if normal PAT2 churn overwrites the generic last-64 history.
+
+The warning/error pattern remained boot-time VF autoprobe noise:
+
+- VF-side MCR warning from `xe 0000:00:02.1` during host VF probe.
+- VF-side `GuC mmio request 0xf025005: failure 0xa` and explicit clear
+  fallback before the VF was rebound to `vfio-pci`.
+- No runtime PF service/GGTT errors were captured while the Windows VM was
+  running.
+
+## NixOS VF Guest Harness Freeze
+
+After the Windows VM was stopped, a first NixOS VF guest harness was built to
+test the Linux guest xe VF path with the same host-pinned versions:
+
+- host kernel: `7.0.12`
+- host module package: `xe-sriov-module-2026.05.06-7.0.12`
+- `nixpkgs`: `134c6973427a26f0b8924e7bb1a2ce5a9249d903`
+- `i915-sriov`: `2c46b49ffaa63db22654dd6067052ecaf05194c4`
+
+The host hard-froze during the first launch attempt and had to be rebooted. The
+previous-boot journal shows the launch stopped at:
+
+```text
+Started NixOS xe SR-IOV VF guest.
+Disk image does not exist, creating the virtualisation disk image...
+Virtualisation disk image created.
+Creating Nix store image...
+```
+
+There was no subsequent `qemu-system-*` line, no VFIO open/reset line at the
+launch timestamp, and no `vfio-pci 0000:00:02.1` FLR after the VM launcher
+started. The last recorded launcher phase was the generated NixOS VM script's
+just-in-time `tar | mkfs.erofs` Nix store image creation, before QEMU reached
+VF passthrough.
+
+Interpretation:
+
+- This reboot is not evidence that the Linux xe VF guest path wedged the GPU.
+- The freeze happened before VFIO attach, so it is a host VM-launch/storage
+  failure around the generated EROFS store image path.
+- The harness was changed to use a host Nix store 9p mount
+  (`mountHostNixStore = true`, `useNixStoreImage = false`) and to provide a
+  no-VF smoke-test VM config before retrying VF passthrough.
+- The regenerated no-VF and VF launchers were inspected after rebuild: neither
+  contains `Creating Nix store image`, `mkfs.erofs`, or `store.img`; the no-VF
+  config has no `host=0000:00:02.1`, while the VF config keeps that VFIO device.
+
 ## Next Low-Noise Captures
 
 Batch root commands with one `run0 bash -lc '...'` invocation. Avoid live
@@ -363,12 +478,11 @@ Turn budgets back to zero after the repro.
 Useful next instrumentation should not be a broad printk stream. Add bounded
 structured debugfs state instead:
 
-- Per-PAT last-N update ring for VF GGTT updates, especially PAT3 entries.
-- The branch now has a generic last-64 update history in `trace_ggtt`; if this
-  is not selective enough, split the history into per-PAT rings.
+- The branch now has a generic last-64 update history plus per-PAT history
+  rings in `trace_ggtt`.
 - Optional range-filtered shadow/live snapshot beyond the first 32 PTEs.
-- A compact "last pushed VF config KLVs" snapshot for each VF and GT, recorded
-  in the actual push path, not just `config_blob`.
+- The branch now has a compact config-push history ring for each VF and GT,
+  recorded in the actual push path, not just `config_blob`.
 - A MOCS/PAT compare helper that prints GT0 and GT1 together and flags all-zero
   LNCFCMOCS on media GT.
 

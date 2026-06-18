@@ -56,6 +56,23 @@ static const char *ggtt_update_mode_to_string(u32 mode)
 	}
 }
 
+static void ggtt_print_history_record(struct drm_printer *p, u64 seq,
+				      struct xe_gt_sriov_pf_ggtt_record *record)
+{
+	drm_printf(p,
+		   "[%llu] t=%lluns %s off=%u..%u mode=%s copies=%u count=%u ptes=%u ret=%d pat_mask=%#x flags=%#llx final_flags=%#llx old=%#llx raw=%#llx..%#llx final=%#llx..%#llx\n",
+		   seq, READ_ONCE(record->ktime_ns),
+		   ggtt_update_source_to_string(READ_ONCE(record->source)),
+		   READ_ONCE(record->offset), READ_ONCE(record->end),
+		   ggtt_update_mode_to_string(READ_ONCE(record->mode)),
+		   READ_ONCE(record->num_copies), READ_ONCE(record->count),
+		   READ_ONCE(record->n_ptes), READ_ONCE(record->ret),
+		   READ_ONCE(record->pat_mask), READ_ONCE(record->raw_flags_mask),
+		   READ_ONCE(record->final_flags_mask), READ_ONCE(record->old_first),
+		   READ_ONCE(record->raw_first), READ_ONCE(record->raw_last),
+		   READ_ONCE(record->final_first), READ_ONCE(record->final_last));
+}
+
 static bool ggtt_update_mode_is_duplicate(u32 mode)
 {
 	return mode == 0 || mode == 2;
@@ -102,6 +119,7 @@ static void ggtt_record_history(struct xe_gt_sriov_pf_ggtt_debug *debug,
 	u64 seq = atomic64_inc_return(&debug->history_seq);
 	struct xe_gt_sriov_pf_ggtt_record *record =
 		&debug->history[(seq - 1) % XE_GT_SRIOV_PF_DEBUG_GGTT_HISTORY];
+	u32 pat;
 
 	WRITE_ONCE(record->ktime_ns, ktime_get_mono_fast_ns());
 	WRITE_ONCE(record->raw_first, raw_first);
@@ -123,6 +141,58 @@ static void ggtt_record_history(struct xe_gt_sriov_pf_ggtt_debug *debug,
 
 	/* Publish seq last so readers can skip partially updated records. */
 	WRITE_ONCE(record->seq, seq);
+
+	for (pat = 0; pat < XE_GT_SRIOV_GGTT_PAT_COUNT; pat++) {
+		u64 pat_seq;
+
+		if (!(pat_mask & BIT(pat)))
+			continue;
+
+		pat_seq = atomic64_inc_return(&debug->pat_history_seq[pat]);
+		record = &debug->pat_history[pat]
+			[(pat_seq - 1) % XE_GT_SRIOV_PF_DEBUG_GGTT_PAT_HISTORY];
+
+		WRITE_ONCE(record->ktime_ns, ktime_get_mono_fast_ns());
+		WRITE_ONCE(record->raw_first, raw_first);
+		WRITE_ONCE(record->raw_last, raw_last);
+		WRITE_ONCE(record->final_first, final_first);
+		WRITE_ONCE(record->final_last, final_last);
+		WRITE_ONCE(record->old_first, old_first);
+		WRITE_ONCE(record->raw_flags_mask, raw_flags_mask);
+		WRITE_ONCE(record->final_flags_mask, final_flags_mask);
+		WRITE_ONCE(record->source, source);
+		WRITE_ONCE(record->mode, mode);
+		WRITE_ONCE(record->num_copies, num_copies);
+		WRITE_ONCE(record->count, count);
+		WRITE_ONCE(record->n_ptes, n_ptes);
+		WRITE_ONCE(record->offset, pte_offset);
+		WRITE_ONCE(record->end, pte_offset + n_ptes);
+		WRITE_ONCE(record->ret, ret);
+		WRITE_ONCE(record->pat_mask, pat_mask);
+
+		/* Publish seq last so readers can skip partially updated records. */
+		WRITE_ONCE(record->seq, pat_seq);
+	}
+}
+
+static void config_record_history(struct xe_gt_sriov_pf_config_debug *debug,
+				  u32 seq, const u32 *klvs, u32 num_dwords,
+				  u32 stored, int num_klvs, int err)
+{
+	struct xe_gt_sriov_pf_config_record *record =
+		&debug->history[(seq - 1) % XE_GT_SRIOV_PF_DEBUG_CONFIG_HISTORY];
+
+	record->ktime_ns = ktime_get_mono_fast_ns();
+	record->err = err;
+	record->num_klvs = num_klvs;
+	record->num_dwords = num_dwords;
+	record->stored_dwords = stored;
+	record->truncated = stored != num_dwords;
+	if (stored)
+		memcpy(record->klvs, klvs, stored * sizeof(*klvs));
+
+	/* Publish seq last so readers can skip unused records. */
+	record->seq = seq;
 }
 
 static void ggtt_decode_entry(const u64 *ptes, u16 count, u32 mode,
@@ -202,6 +272,7 @@ void xe_gt_sriov_pf_debug_record_config_push(struct xe_gt *gt, unsigned int vfid
 	debug->last_truncated = stored != num_dwords;
 	if (stored)
 		memcpy(debug->last_klvs, klvs, stored * sizeof(*klvs));
+	config_record_history(debug, debug->last_seq, klvs, num_dwords, stored, num_klvs, err);
 	spin_unlock_irqrestore(&debug->lock, flags);
 
 	if ((err && (READ_ONCE(debug->flags) & XE_GT_SRIOV_PF_DEBUG_LOG_ERRORS) &&
@@ -448,7 +519,8 @@ int xe_gt_sriov_pf_debug_print_config(struct xe_gt *gt, unsigned int vfid,
 	struct xe_gt_sriov_pf_config_debug *debug;
 	u32 klvs[XE_GT_SRIOV_PF_DEBUG_MAX_KLV_DWORDS];
 	unsigned long flags;
-	u32 stored, num_dwords, seq, num_klvs, err;
+	u32 stored, num_dwords, seq, num_klvs, err, first_seq;
+	u32 history_seq;
 	bool truncated;
 
 	if (unlikely(vfid > xe_gt_sriov_pf_get_totalvfs(gt)))
@@ -478,6 +550,45 @@ int xe_gt_sriov_pf_debug_print_config(struct xe_gt *gt, unsigned int vfid,
 	drm_printf(p, "last_stored_dwords: %u%s\n", stored, truncated ? " truncated" : "");
 	if (stored)
 		xe_guc_klv_print(klvs, stored, p);
+
+	drm_puts(p, "\nhistory:\n");
+	if (seq > XE_GT_SRIOV_PF_DEBUG_CONFIG_HISTORY)
+		first_seq = seq - XE_GT_SRIOV_PF_DEBUG_CONFIG_HISTORY + 1;
+	else
+		first_seq = 1;
+
+	for (history_seq = first_seq; history_seq <= seq; history_seq++) {
+		struct xe_gt_sriov_pf_config_record *record;
+		u64 h_ktime_ns = 0;
+		s32 h_err = 0, h_num_klvs = 0;
+		u32 h_num_dwords = 0, h_stored = 0;
+		bool h_truncated = false, valid;
+
+		spin_lock_irqsave(&debug->lock, flags);
+		record = &debug->history[(history_seq - 1) % XE_GT_SRIOV_PF_DEBUG_CONFIG_HISTORY];
+		valid = record->seq == history_seq;
+		if (valid) {
+			h_ktime_ns = record->ktime_ns;
+			h_err = record->err;
+			h_num_klvs = record->num_klvs;
+			h_num_dwords = record->num_dwords;
+			h_stored = record->stored_dwords;
+			h_truncated = record->truncated;
+			if (h_stored)
+				memcpy(klvs, record->klvs, h_stored * sizeof(*klvs));
+		}
+		spin_unlock_irqrestore(&debug->lock, flags);
+
+		if (!valid)
+			continue;
+
+		drm_printf(p,
+			   "[%u] t=%lluns err=%d num_klvs=%d num_dwords=%u stored_dwords=%u%s\n",
+			   history_seq, h_ktime_ns, h_err, h_num_klvs,
+			   h_num_dwords, h_stored, h_truncated ? " truncated" : "");
+		if (h_stored)
+			xe_guc_klv_print(klvs, h_stored, p);
+	}
 
 	return 0;
 }
@@ -593,21 +704,37 @@ int xe_gt_sriov_pf_debug_print_ggtt(struct xe_gt *gt, unsigned int vfid,
 			continue;
 
 		any_history = true;
-		drm_printf(p,
-			   "[%llu] t=%lluns %s off=%u..%u mode=%s copies=%u count=%u ptes=%u ret=%d pat_mask=%#x flags=%#llx final_flags=%#llx old=%#llx raw=%#llx..%#llx final=%#llx..%#llx\n",
-			   seq, READ_ONCE(record->ktime_ns),
-			   ggtt_update_source_to_string(READ_ONCE(record->source)),
-			   READ_ONCE(record->offset), READ_ONCE(record->end),
-			   ggtt_update_mode_to_string(READ_ONCE(record->mode)),
-			   READ_ONCE(record->num_copies), READ_ONCE(record->count),
-			   READ_ONCE(record->n_ptes), READ_ONCE(record->ret),
-			   READ_ONCE(record->pat_mask), READ_ONCE(record->raw_flags_mask),
-			   READ_ONCE(record->final_flags_mask), READ_ONCE(record->old_first),
-			   READ_ONCE(record->raw_first), READ_ONCE(record->raw_last),
-			   READ_ONCE(record->final_first), READ_ONCE(record->final_last));
+		ggtt_print_history_record(p, seq, record);
 	}
 	if (!any_history)
 		drm_puts(p, "(empty)\n");
+
+	for (i = 0; i < XE_GT_SRIOV_GGTT_PAT_COUNT; i++) {
+		u64 pat_history_seq = atomic64_read(&debug->pat_history_seq[i]);
+
+		drm_printf(p, "\npat%u_history_seq: %llu\n", i, pat_history_seq);
+		drm_printf(p, "pat%u_history:\n", i);
+
+		if (pat_history_seq > XE_GT_SRIOV_PF_DEBUG_GGTT_PAT_HISTORY)
+			first_seq = pat_history_seq - XE_GT_SRIOV_PF_DEBUG_GGTT_PAT_HISTORY + 1;
+		else
+			first_seq = 1;
+
+		any_history = false;
+		for (seq = first_seq; seq <= pat_history_seq; seq++) {
+			struct xe_gt_sriov_pf_ggtt_record *record =
+				&debug->pat_history[i]
+				[(seq - 1) % XE_GT_SRIOV_PF_DEBUG_GGTT_PAT_HISTORY];
+
+			if (READ_ONCE(record->seq) != seq)
+				continue;
+
+			any_history = true;
+			ggtt_print_history_record(p, seq, record);
+		}
+		if (!any_history)
+			drm_puts(p, "(empty)\n");
+	}
 
 	return 0;
 }
