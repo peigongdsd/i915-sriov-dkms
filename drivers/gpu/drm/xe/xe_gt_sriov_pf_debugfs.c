@@ -4,16 +4,20 @@
  */
 
 #include <linux/debugfs.h>
+#include <linux/limits.h>
 
 #include <drm/drm_print.h>
 #include <drm/drm_debugfs.h>
 
 #include "xe_debugfs.h"
 #include "xe_device.h"
+#include "xe_ggtt.h"
 #include "xe_gt.h"
 #include "xe_gt_debugfs.h"
 #include "xe_gt_sriov_pf_config.h"
 #include "xe_gt_sriov_pf_control.h"
+#include "xe_gt_sriov_pf_debug.h"
+#include "xe_gt_sriov_pf_debug_types.h"
 #include "xe_gt_sriov_pf_debugfs.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_migration.h"
@@ -781,6 +785,156 @@ static const struct file_operations config_blob_ops = {
 	.release	= config_blob_release,
 };
 
+static struct xe_gt_sriov_pf_debug_data *debug_data(struct dentry *parent)
+{
+	struct xe_gt *gt = extract_gt(parent);
+	unsigned int vfid = extract_vfid(parent);
+
+	return &gt->sriov.pf.vfs[vfid].debug;
+}
+
+static int trace_ggtt_show(struct seq_file *m, void *data)
+{
+	struct drm_printer p = drm_seq_file_printer(m);
+	struct xe_gt *gt = extract_gt(m->private);
+	unsigned int vfid = extract_vfid(m->private);
+	struct xe_gt_sriov_pf_ggtt_debug *debug = &gt->sriov.pf.vfs[vfid].debug.ggtt;
+	struct xe_ggtt_node *node = gt->sriov.pf.vfs[vfid].config.ggtt_region;
+	u32 start = READ_ONCE(debug->snapshot_start);
+	u32 count = READ_ONCE(debug->snapshot_count);
+	int ret;
+
+	ret = xe_gt_sriov_pf_debug_print_ggtt(gt, vfid, &p);
+	if (ret)
+		return ret;
+
+	drm_puts(&p, "\nshadow_snapshot:\n");
+	ret = xe_ggtt_node_print_vf_shadow(node, vfid, start, count, &p);
+	if (ret)
+		drm_printf(&p, "error: %pe\n", ERR_PTR(ret));
+
+	return 0;
+}
+
+static int trace_ggtt_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, trace_ggtt_show, inode->i_private);
+}
+
+static const struct file_operations trace_ggtt_fops = {
+	.owner = THIS_MODULE,
+	.open = trace_ggtt_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static int trace_config_show(struct seq_file *m, void *data)
+{
+	struct drm_printer p = drm_seq_file_printer(m);
+	struct xe_gt *gt = extract_gt(m->private);
+	unsigned int vfid = extract_vfid(m->private);
+
+	return xe_gt_sriov_pf_debug_print_config(gt, vfid, &p);
+}
+
+static int trace_config_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, trace_config_show, inode->i_private);
+}
+
+static const struct file_operations trace_config_fops = {
+	.owner = THIS_MODULE,
+	.open = trace_config_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static int trace_service_show(struct seq_file *m, void *data)
+{
+	struct drm_printer p = drm_seq_file_printer(m);
+	struct xe_gt *gt = extract_gt(m->private);
+	unsigned int vfid = extract_vfid(m->private);
+
+	return xe_gt_sriov_pf_debug_print_service(gt, vfid, &p);
+}
+
+static int trace_service_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, trace_service_show, inode->i_private);
+}
+
+static const struct file_operations trace_service_fops = {
+	.owner = THIS_MODULE,
+	.open = trace_service_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static ssize_t trace_control_write(struct file *file, const char __user *ubuf,
+				   size_t size, loff_t *pos)
+{
+	struct dentry *parent = file_inode(file)->i_private;
+	struct xe_gt *gt = extract_gt(parent);
+	unsigned int vfid = extract_vfid(parent);
+	char cmd[32];
+	int ret;
+
+	if (*pos)
+		return -ESPIPE;
+	if (!size)
+		return -ENODATA;
+	if (size > sizeof(cmd) - 1)
+		return -EINVAL;
+
+	ret = simple_write_to_buffer(cmd, sizeof(cmd) - 1, pos, ubuf, size);
+	if (ret < 0)
+		return ret;
+	cmd[ret] = '\0';
+
+	if (sysfs_streq(cmd, "reset_ggtt"))
+		xe_gt_sriov_pf_debug_reset_ggtt(gt, vfid);
+	else
+		return -EINVAL;
+
+	return size;
+}
+
+static ssize_t trace_control_read(struct file *file, char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	const char help[] = "reset_ggtt\n";
+
+	return simple_read_from_buffer(buf, count, ppos, help, strlen(help));
+}
+
+static const struct file_operations trace_control_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = trace_control_write,
+	.read = trace_control_read,
+	.llseek = default_llseek,
+};
+
+static int atomic_debug_get(void *data, u64 *val)
+{
+	*val = atomic_read(data);
+	return 0;
+}
+
+static int atomic_debug_set(void *data, u64 val)
+{
+	if (val > INT_MAX)
+		return -EOVERFLOW;
+
+	atomic_set(data, val);
+	return 0;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(atomic_debug_fops, atomic_debug_get, atomic_debug_set, "%llu\n");
+
 static void pf_add_compat_attrs(struct xe_gt *gt, struct dentry *dent, unsigned int vfid)
 {
 	struct xe_device *xe = gt_to_xe(gt);
@@ -801,6 +955,37 @@ static void pf_add_compat_attrs(struct xe_gt *gt, struct dentry *dent, unsigned 
 			debugfs_create_symlink("lmem_provisioned", dent, "../vram_provisioned");
 		}
 	}
+}
+
+static void pf_add_trace_attrs(struct xe_gt *gt, struct dentry *dent, unsigned int vfid)
+{
+	struct xe_gt_sriov_pf_debug_data *debug = debug_data(dent);
+
+	xe_gt_assert(gt, gt == extract_gt(dent));
+	xe_gt_assert(gt, vfid == extract_vfid(dent));
+
+	debugfs_create_file("trace_ggtt", 0400, dent, dent, &trace_ggtt_fops);
+	debugfs_create_file("trace_config", 0400, dent, dent, &trace_config_fops);
+	debugfs_create_file("trace_service", 0400, dent, dent, &trace_service_fops);
+	debugfs_create_file("trace_control", 0600, dent, dent, &trace_control_fops);
+
+	debugfs_create_x32("trace_ggtt_flags", 0600, dent, &debug->ggtt.flags);
+	debugfs_create_file("trace_ggtt_log_budget", 0600, dent,
+			    &debug->ggtt.log_budget, &atomic_debug_fops);
+	debugfs_create_file("trace_ggtt_raw_budget", 0600, dent,
+			    &debug->ggtt.raw_budget, &atomic_debug_fops);
+	debugfs_create_u32("trace_ggtt_filter_start", 0600, dent, &debug->ggtt.filter_start);
+	debugfs_create_u32("trace_ggtt_filter_count", 0600, dent, &debug->ggtt.filter_count);
+	debugfs_create_u32("trace_ggtt_snapshot_start", 0600, dent, &debug->ggtt.snapshot_start);
+	debugfs_create_u32("trace_ggtt_snapshot_count", 0600, dent, &debug->ggtt.snapshot_count);
+
+	debugfs_create_x32("trace_config_flags", 0600, dent, &debug->config.flags);
+	debugfs_create_file("trace_config_log_budget", 0600, dent,
+			    &debug->config.log_budget, &atomic_debug_fops);
+
+	debugfs_create_x32("trace_service_flags", 0600, dent, &debug->service.flags);
+	debugfs_create_file("trace_service_log_budget", 0600, dent,
+			    &debug->service.log_budget, &atomic_debug_fops);
 }
 
 static void pf_populate_gt(struct xe_gt *gt, struct dentry *dent, unsigned int vfid)
@@ -828,6 +1013,8 @@ static void pf_populate_gt(struct xe_gt *gt, struct dentry *dent, unsigned int v
 
 		drm_debugfs_create_files(pf_info, ARRAY_SIZE(pf_info), dent, minor);
 	}
+
+	pf_add_trace_attrs(gt, dent, vfid);
 
 	/* for backward compatibility only */
 	pf_add_compat_attrs(gt, dent, vfid);

@@ -416,3 +416,61 @@ The first implementation patch should be trace-only:
 
 Do not add the conservative policy switch until the trace output shows which
 PTE/cache/compression classes are active during the glitch.
+
+## Implemented Debugfs Trace Interface
+
+The debug patch adds a trace-only xe PF interface under each VF GT directory:
+
+- `/sys/kernel/debug/dri/<BDF>/sriov/vf<N>/tile<M>/gt<K>/trace_ggtt`
+- `/sys/kernel/debug/dri/<BDF>/sriov/vf<N>/tile<M>/gt<K>/trace_config`
+- `/sys/kernel/debug/dri/<BDF>/sriov/vf<N>/tile<M>/gt<K>/trace_service`
+- `/sys/kernel/debug/dri/<BDF>/sriov/vf<N>/tile<M>/gt<K>/trace_control`
+
+Useful knobs:
+
+- `trace_ggtt_flags`: bitmask, `1` logs update summaries, `2` logs raw first/last
+  PTEs, `4` logs errors.
+- `trace_ggtt_log_budget`: max number of GGTT summary/error lines to print.
+- `trace_ggtt_raw_budget`: max number of raw PTE lines to print.
+- `trace_ggtt_filter_start` and `trace_ggtt_filter_count`: optional PTE-offset
+  filter for dmesg logging. Count `0` means no filter.
+- `trace_ggtt_snapshot_start` and `trace_ggtt_snapshot_count`: bounded shadow
+  GGTT range included when reading `trace_ggtt`.
+- `trace_config_flags` and `trace_config_log_budget`: config KLV push logging.
+- `trace_service_flags` and `trace_service_log_budget`: relay/MMIO error logging.
+- `trace_control`: write `reset_ggtt` to reset GGTT counters while preserving
+  trace knobs.
+
+Recommended first capture for VF1 primary GT:
+
+```sh
+cd /sys/kernel/debug/dri/<BDF>/sriov/vf1/tile0/gt0
+echo 4 > trace_service_flags
+echo 4 > trace_ggtt_flags
+echo 20 > trace_service_log_budget
+echo 50 > trace_ggtt_log_budget
+cat trace_config > /tmp/xe-vf1-config-before.txt
+echo reset_ggtt > trace_control
+```
+
+After reproducing the glitch:
+
+```sh
+cat trace_service > /tmp/xe-vf1-service-after.txt
+cat trace_ggtt > /tmp/xe-vf1-ggtt-after.txt
+dmesg > /tmp/xe-vf1-dmesg-after.txt
+```
+
+If the first run shows a hot GGTT range, set `trace_ggtt_snapshot_start` and
+`trace_ggtt_snapshot_count` around that range, then enable summary/raw logging
+with small budgets:
+
+```sh
+echo <start> > trace_ggtt_snapshot_start
+echo 128 > trace_ggtt_snapshot_count
+echo <start> > trace_ggtt_filter_start
+echo 256 > trace_ggtt_filter_count
+echo 7 > trace_ggtt_flags
+echo 80 > trace_ggtt_log_budget
+echo 20 > trace_ggtt_raw_budget
+```

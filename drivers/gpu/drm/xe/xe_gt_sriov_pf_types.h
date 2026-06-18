@@ -10,6 +10,7 @@
 
 #include "xe_gt_sriov_pf_config_types.h"
 #include "xe_gt_sriov_pf_control_types.h"
+#include "xe_gt_sriov_pf_debug_types.h"
 #include "xe_gt_sriov_pf_migration_types.h"
 #include "xe_gt_sriov_pf_monitor_types.h"
 #include "xe_gt_sriov_pf_policy_types.h"
@@ -33,6 +34,9 @@ struct xe_gt_sriov_metadata {
 
 	/** @migration: per-VF migration data. */
 	struct xe_gt_sriov_migration_data migration;
+
+	/** @debug: per-VF debug and trace data. */
+	struct xe_gt_sriov_pf_debug_data debug;
 };
 
 /**

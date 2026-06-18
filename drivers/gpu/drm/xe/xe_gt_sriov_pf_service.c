@@ -14,6 +14,8 @@
 #include "xe_assert.h"
 #include "xe_mmio.h"
 #include "xe_gt_sriov_pf_helpers.h"
+#include "xe_gt_sriov_pf_debug.h"
+#include "xe_gt_sriov_pf_debug_types.h"
 #include "xe_gt_sriov_printk.h"
 #include "xe_gt_sriov_pf_service.h"
 #include "xe_gt_sriov_pf_service_types.h"
@@ -172,7 +174,8 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 			u16 local_num_copies = VF2PF_UPDATE_GGTT32_IS_LAST_MODE(mode) ?
 					       0 : num_copies;
 
-			ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode,
+			ret = xe_ggtt_update_vf_ptes(node, vfid, XE_GT_SRIOV_GGTT_UPDATE_RELAY,
+						     pte_offset, mode,
 						     local_num_copies, start_range, range_size);
 			if (ret < 0)
 				return ret;
@@ -186,7 +189,8 @@ static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
 		range_size++;
 	}
 
-	ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode, num_copies,
+	ret = xe_ggtt_update_vf_ptes(node, vfid, XE_GT_SRIOV_GGTT_UPDATE_RELAY,
+				     pte_offset, mode, num_copies,
 				     start_range, range_size);
 	if (ret < 0)
 		return ret;
@@ -481,6 +485,8 @@ int xe_gt_sriov_pf_service_process_request(struct xe_gt *gt, u32 origin,
 		ret = -EOPNOTSUPP;
 		break;
 	}
+
+	xe_gt_sriov_pf_debug_record_service(gt, origin, action, msg_len, resp_size, ret);
 
 	return ret;
 }

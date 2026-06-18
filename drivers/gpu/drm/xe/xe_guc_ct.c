@@ -26,6 +26,8 @@
 #include "xe_gt.h"
 #include "xe_gt_printk.h"
 #include "xe_gt_sriov_pf_control.h"
+#include "xe_gt_sriov_pf_debug.h"
+#include "xe_gt_sriov_pf_debug_types.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_monitor.h"
 #include "xe_gt_sriov_pf_service_types.h"
@@ -1668,7 +1670,8 @@ static int mmio_relay_reply_update_ggtt(struct xe_guc *guc, struct xe_gt *gt,
 		drm_info_once(&gt_to_xe(gt)->drm,
 			      "xe: MTL SR-IOV GGTT path: PF MMIO bootstrap GGTT updates active\n");
 
-	ret = xe_ggtt_update_vf_ptes(node, vfid, pte_offset, mode, num_copies,
+	ret = xe_ggtt_update_vf_ptes(node, vfid, XE_GT_SRIOV_GGTT_UPDATE_MMIO,
+				     pte_offset, mode, num_copies,
 				     &pte, 1);
 	if (ret < 0)
 		return ret;
@@ -1748,6 +1751,8 @@ static int mmio_relay_process(struct xe_guc *guc, struct xe_gt *gt,
 
 	if (unlikely(err < 0))
 		mmio_relay_send_error(guc, vfid, magic, -err);
+
+	xe_gt_sriov_pf_debug_record_mmio(gt, vfid, opcode, err);
 
 	return err;
 }

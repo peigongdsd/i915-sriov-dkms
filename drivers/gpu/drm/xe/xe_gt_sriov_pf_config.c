@@ -18,6 +18,7 @@
 #include "xe_ggtt.h"
 #include "xe_gt.h"
 #include "xe_gt_sriov_pf_config.h"
+#include "xe_gt_sriov_pf_debug.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_policy.h"
 #include "xe_gt_sriov_printk.h"
@@ -404,6 +405,7 @@ static int pf_push_full_vf_config(struct xe_gt *gt, unsigned int vfid)
 
 	num_klvs = xe_guc_klv_count(cfg, num_dwords);
 	err = pf_push_vf_buf_klvs(gt, vfid, num_klvs, buf, num_dwords);
+	xe_gt_sriov_pf_debug_record_config_push(gt, vfid, cfg, num_dwords, num_klvs, err);
 
 	return err;
 }

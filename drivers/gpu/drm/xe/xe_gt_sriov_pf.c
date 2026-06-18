@@ -12,6 +12,7 @@
 #include "xe_gt_sriov_pf.h"
 #include "xe_gt_sriov_pf_config.h"
 #include "xe_gt_sriov_pf_control.h"
+#include "xe_gt_sriov_pf_debug.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_migration.h"
 #include "xe_gt_sriov_pf_policy.h"
@@ -79,6 +80,8 @@ int xe_gt_sriov_pf_init_early(struct xe_gt *gt)
 	err = pf_alloc_metadata(gt);
 	if (err)
 		return err;
+
+	xe_gt_sriov_pf_debug_init(gt);
 
 	err = xe_gt_sriov_pf_service_init(gt);
 	if (err)
@@ -300,4 +303,3 @@ bool xe_gt_sriov_pf_sched_groups_enabled(struct xe_gt *gt)
 
 	return xe_gt_sriov_pf_policy_sched_groups_enabled(gt);
 }
-

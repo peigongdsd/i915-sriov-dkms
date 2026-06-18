@@ -30,6 +30,8 @@
 #include "xe_gt_printk.h"
 #include "xe_force_wake.h"
 #include "xe_gt_types.h"
+#include "xe_gt_sriov_pf_debug.h"
+#include "xe_gt_sriov_pf_debug_types.h"
 #include "xe_guc.h"
 #include "xe_guc_ct.h"
 #include "xe_map.h"
@@ -1698,6 +1700,52 @@ int xe_ggtt_node_load(struct xe_ggtt_node *node, const void *src, size_t size, u
 	return 0;
 }
 
+int xe_ggtt_node_print_vf_shadow(struct xe_ggtt_node *node, u16 vfid,
+				 u32 pte_offset, u32 count, struct drm_printer *p)
+{
+	u32 i;
+
+	if (!node)
+		return -ENOENT;
+	if (!node->vf_shadow_ptes)
+		return -ENODATA;
+	if (node->vfid && node->vfid != vfid)
+		return -EPERM;
+	if (pte_offset >= node->vf_shadow_len)
+		return -ERANGE;
+
+	count = min(count, node->vf_shadow_len - pte_offset);
+	count = min_t(u32, count, XE_GT_SRIOV_PF_DEBUG_SNAPSHOT_MAX_PTES);
+
+	guard(mutex)(&node->ggtt->lock);
+
+	drm_printf(p, "vfid: %u\n", vfid);
+	drm_printf(p, "start: %u\n", pte_offset);
+	drm_printf(p, "count: %u\n", count);
+	drm_printf(p, "node_start: %#llx\n", node->base.start);
+	drm_printf(p, "node_size: %#llx\n", node->base.size);
+
+	for (i = 0; i < count; i++) {
+		u64 raw = node->vf_shadow_ptes[pte_offset + i];
+		u64 final = xe_ggtt_prepare_vf_pte(raw, vfid);
+		u64 live = node->ggtt->pt_ops->ggtt_get_pte(node->ggtt,
+							    node->base.start +
+							    (u64)(pte_offset + i) * XE_PAGE_SIZE);
+
+		drm_printf(p,
+			   "[%u] raw=%#llx final=%#llx live=%#llx addr=%#llx flags=%#llx pat=%llu vfid=%llu%s\n",
+			   pte_offset + i, raw, final, live,
+			   raw & XE_GGTT_PTE_ADDR_MASK,
+			   raw & ~XE_GGTT_PTE_ADDR_MASK,
+			   ((raw & XELPG_GGTT_PTE_PAT0) ? 1ull : 0ull) |
+			   ((raw & XELPG_GGTT_PTE_PAT1) ? 2ull : 0ull),
+			   u64_get_bits(live, GGTT_PTE_VFID),
+			   live == final ? "" : " mismatch");
+	}
+
+	return 0;
+}
+
 static void ggtt_vf_apply_work_func(struct work_struct *work)
 {
 	struct xe_ggtt_node *node = container_of(work, typeof(*node), vf_apply_work);
@@ -1735,12 +1783,15 @@ static void ggtt_vf_apply_work_func(struct work_struct *work)
 	}
 }
 
-int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
-			   u8 mode, u16 num_copies, const u64 *ptes, u16 count)
+int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 source,
+			   u32 pte_offset, u8 mode, u16 num_copies,
+			   const u64 *ptes, u16 count)
 {
 	struct xe_ggtt *ggtt;
 	struct xe_device *xe;
 	u64 ggtt_addr, ggtt_addr_end, vf_ggtt_end;
+	u64 old_ptes[64];
+	u64 *old = NULL;
 	u64 entry;
 	u16 n_ptes;
 	u16 remaining;
@@ -1763,11 +1814,19 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	ggtt_addr = node->base.start + (u64)pte_offset * XE_PAGE_SIZE;
 	ggtt_addr_end = ggtt_addr + (u64)n_ptes * XE_PAGE_SIZE - 1;
 	vf_ggtt_end = node->base.start + node->base.size - 1;
-	if (ggtt_addr_end > vf_ggtt_end)
+	if (ggtt_addr_end > vf_ggtt_end) {
+		xe_gt_sriov_pf_debug_record_ggtt_update(ggtt->tile->primary_gt, vfid, source,
+							pte_offset, mode, num_copies,
+							NULL, ptes, count, -ERANGE);
 		return -ERANGE;
+	}
 
-	if (node->vf_shadow_ptes && pte_offset + n_ptes > node->vf_shadow_len)
+	if (node->vf_shadow_ptes && pte_offset + n_ptes > node->vf_shadow_len) {
+		xe_gt_sriov_pf_debug_record_ggtt_update(ggtt->tile->primary_gt, vfid, source,
+							pte_offset, mode, num_copies,
+							NULL, ptes, count, -ERANGE);
 		return -ERANGE;
+	}
 
 	mtl_path = xe_device_needs_mtl_ggtt_binder(xe) && IS_SRIOV_PF(xe);
 
@@ -1778,6 +1837,12 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 		remaining = count - 1;
 		duplicated = mode == VF2PF_UPDATE_GGTT32_MODE_DUPLICATE ||
 			     mode == VF2PF_UPDATE_GGTT32_MODE_DUPLICATE_LAST;
+
+		if (node->vf_shadow_ptes && n_ptes <= ARRAY_SIZE(old_ptes)) {
+			for (i = 0; i < n_ptes; i++)
+				old_ptes[i] = node->vf_shadow_ptes[pte_offset + i];
+			old = old_ptes;
+		}
 
 		switch (mode) {
 		case VF2PF_UPDATE_GGTT32_MODE_DUPLICATE:
@@ -1821,6 +1886,10 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 			}
 			break;
 		default:
+			xe_gt_sriov_pf_debug_record_ggtt_update(ggtt->tile->primary_gt, vfid,
+								source, pte_offset, mode,
+								num_copies, old, ptes,
+								count, -EINVAL);
 			return -EINVAL;
 		}
 
@@ -1844,12 +1913,18 @@ int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 pte_offset,
 	}
 
 	if (mtl_path && node->vf_shadow_ptes) {
+		xe_gt_sriov_pf_debug_record_ggtt_update(ggtt->tile->primary_gt, vfid, source,
+							pte_offset, mode, num_copies,
+							old, ptes, count, n_ptes);
 		if (queue_apply)
 			queue_work(ggtt->wq, &node->vf_apply_work);
 		return n_ptes;
 	}
 
 	xe_ggtt_invalidate_deferred(ggtt);
+	xe_gt_sriov_pf_debug_record_ggtt_update(ggtt->tile->primary_gt, vfid, source,
+						pte_offset, mode, num_copies,
+						old, ptes, count, n_ptes);
 	return n_ptes;
 }
 
