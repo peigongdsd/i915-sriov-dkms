@@ -16,6 +16,7 @@
 #include "abi/guc_actions_abi.h"
 #include "abi/guc_actions_slpc_abi.h"
 #include "abi/guc_klvs_abi.h"
+#include "regs/xe_lrc_layout.h"
 #include "xe_assert.h"
 #include "xe_bo.h"
 #include "xe_devcoredump.h"
@@ -3042,6 +3043,28 @@ int xe_guc_exec_queue_memory_cat_error_handler(struct xe_guc *guc, u32 *msg,
 			   xe_hw_engine_class_to_str(q->class), q->logical_mask, guc_id);
 
 	trace_xe_exec_queue_memory_cat_error(q);
+
+	if (guc_to_xe(guc)->info.platform == XE_ALDERLAKE_P &&
+	    q->class == XE_ENGINE_CLASS_RENDER && q->width == 1) {
+		struct xe_file *xef = q->vm ? q->vm->xef : NULL;
+		struct xe_lrc *lrc = xe_exec_queue_get_lrc(q, 0);
+
+		xe_gt_info(gt, "ADLP CAT owner: guc_id=%u flags=0x%lx in %s [%d]",
+			   guc_id, q->flags,
+			   xef ? xef->process_name : "no process",
+			   xef ? xef->pid : -1);
+
+		/* Saved context memory, not an atomic live engine snapshot. */
+		if (!IS_ERR_OR_NULL(lrc)) {
+			xe_gt_info(gt,
+				   "ADLP CAT saved LRC: ggtt=0x%08x per_ctx=0x%08x indirect=0x%08x offset=0x%08x",
+				   xe_lrc_ggtt_addr(lrc),
+				   xe_lrc_read_ctx_reg(lrc, CTX_BB_PER_CTX_PTR),
+				   xe_lrc_read_ctx_reg(lrc, CTX_CS_INDIRECT_CTX),
+				   xe_lrc_read_ctx_reg(lrc, CTX_CS_INDIRECT_CTX_OFFSET));
+			xe_lrc_put(lrc);
+		}
+	}
 
 	/* Treat the same as engine reset */
 	xe_guc_exec_queue_reset_trigger_cleanup(q);
