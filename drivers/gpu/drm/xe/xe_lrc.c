@@ -1461,15 +1461,18 @@ setup_indirect_ctx(struct xe_lrc *lrc, struct xe_hw_engine *hwe)
 	finish_bo(&state);
 	kfree(state.buffer);
 
-	/*
-	 * Enable INDIRECT_CTX leaving INDIRECT_CTX_OFFSET at its default: it
-	 * varies per engine class, but the default is good enough
-	 */
+	/* Enable INDIRECT_CTX with its size in cachelines. */
 	xe_lrc_write_ctx_reg(lrc,
 			     CTX_CS_INDIRECT_CTX,
 			     (xe_bo_ggtt_addr(lrc->bo) + state.offset) |
 			     /* Size in CLs. */
 			     (state.written * sizeof(u32) / 64));
+
+	/* ADL-P can capture a zero RCS offset; restore the Gen12 default. */
+	if (lrc_to_xe(lrc)->info.platform == XE_ALDERLAKE_P &&
+	    hwe->class == XE_ENGINE_CLASS_RENDER)
+		xe_lrc_write_ctx_reg(lrc, CTX_CS_INDIRECT_CTX_OFFSET,
+				     REG_FIELD_PREP(REG_GENMASK(15, 6), 0xd));
 
 	return 0;
 }
