@@ -18,6 +18,15 @@ The patch fixes duplicate emission of XeLP timestamp workaround `Wa_16010904313`
 - [Detailed research report](RESEARCH-REPORT.md)
 - [Windows analysis and reproducibility](windows/README.md)
 
+After testing, preserve separate host and Linux guest captures with the [read-only collector](collect-adlp-debug.sh). Replace the example BDFs with the host PF and the VF address shown inside the guest, and choose fresh output paths:
+
+```sh
+sudo bash docs/xe-sriov/collect-adlp-debug.sh host 0000:00:02.0 /tmp/adlp-host-failed
+sudo bash docs/xe-sriov/collect-adlp-debug.sh guest 0000:00:08.0 /tmp/adlp-guest-failed
+```
+
+Run the second command inside the Linux guest. Each run creates an output directory and a `.tar.gz` archive; `collection-status.txt` records missing files and timed-out reads. The collector preserves logs even when VF probe fails and does not configure the GPU. Capture immediately after the first failure, before rebooting. See the [test plan](patches/adlp/TESTING.md) for baseline comparisons and per-engine execution tests.
+
 The study obtained the authoritative Xe project's full advertised branch/tag histories and recorded [their identities](xe-full-official-refs.txt). Commit review was targeted to the relevant platforms, SR-IOV and context paths; it was not a manual review of every kernel commit. The complete local Git history and downloaded driver binaries are not embedded in this repository.
 
 No new MTL relay protocol or MTL driver changes are introduced here. Future work should first reuse Xe's existing interfaces and establish hardware requirements before importing any legacy implementation.

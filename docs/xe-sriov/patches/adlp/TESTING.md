@@ -4,6 +4,17 @@ This is a hardware test plan for the ADL-P timestamp-workaround backport. No com
 
 The patch fixes duplicate emission of Wa_16010904313 in Xe's context restore code. Successful compilation does not establish that it fixes the reported failed vGPU. Keep the first failure stage and the guest driver explicit.
 
+## Collecting a result
+
+The [read-only collector](../../collect-adlp-debug.sh) captures boot identity, full kernel logs, the selected files listed below, and any existing devcoredump matching the supplied BDF. From the repository root, run on the host and separately inside the Linux guest:
+
+```sh
+sudo bash docs/xe-sriov/collect-adlp-debug.sh host 0000:00:02.0 /tmp/adlp-host-failed
+sudo bash docs/xe-sriov/collect-adlp-debug.sh guest 0000:00:08.0 /tmp/adlp-guest-failed
+```
+
+Replace the examples with the actual host PF and guest VF BDFs. Use a fresh output path for every baseline/patched run. Each command creates that directory and `<OUT>.tar.gz`, refusing existing outputs. Read `collection-status.txt` for missing files, permissions and timeouts. Run immediately after the first failure; failed probe may leave no guest debugfs files, but boot logs are still collected. The collector does not mount debugfs, provision VFs, reset devices, enable tracing or install anything. It is a Linux collector; use `host` for the Linux PF when the guest is Windows and preserve Windows driver/device/error information separately.
+
 ## What the patch can change
 
 | Host PF | Guest VF | Code affected by a Linux Xe patch |

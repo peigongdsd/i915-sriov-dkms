@@ -1,6 +1,6 @@
 # Intel SR-IOV research: ADL-P first, then MTL/ARL
 
-Progress report · revision 5 · updated 2026-10-02T19:52:41+08:00
+Progress report · revision 6 · updated 2026-10-02T19:59:36+08:00
 
 This report supports the concrete goal of fixing Linux Xe SR-IOV on **ADL-P first**, then MTL/ARL, with minimal migration of i915 internals. Windows guest-driver analysis is supporting evidence for separating failure causes. Confirmed source facts, published observations, diagnostic hypotheses, and untested proposals are kept distinct. No host driver has been installed, no live GPU configuration has been changed, and no hardware reproduction has been performed in this research session.
 
@@ -43,11 +43,11 @@ The modern alternatives are already substantial: RTP entries feed GuC ADS regist
 | Code delta | `drivers/gpu/drm/xe/xe_lrc.c`: 25 insertions, 13 deletions |
 | Build | **Passed, exit 0:** complete `xe.ko` and `intel_sriov_compat.ko` against Linux 7.2.8 development headers; GCC 16.2.0 and binutils supplied through a Nix build environment |
 | Runtime validation | No driver installation, module load, VF creation or hardware test performed |
-| Repository delivery | New branches prepared in the user's fork; SSH publication and final documentation commit pending verification |
+| Repository delivery | Both new branches pushed over SSH and verified by remote ref readback; initial ADL-P publication head `2576d0c17909fc5ef450744009c7d4df6528730f` |
 
 The build completed `MODPOST` and linked both modules without unresolved-symbol errors. The log records a missing optional Nix channel path, a `pahole` version warning, and skipped BTF generation because `vmlinux` was unavailable. Those environment limitations are retained in `patches/adlp/build-7.2.8.log`; build success establishes compilation/linkage for this kernel, not GPU correctness or all-kernel DKMS compatibility.
 
-Prepared publication targets, **not yet verified pushed at this revision**: [upstream-sync branch](https://github.com/peigongdsd/i915-sriov-dkms/tree/codex/upstream-sync-2026-10-02) and [ADL-P implementation branch](https://github.com/peigongdsd/i915-sriov-dkms/tree/codex/xe-adlp-2026-10-02). The report is intended for `docs/xe-sriov/RESEARCH-REPORT.md` on the implementation branch. The source commit and clean baseline above identify the reviewable code independently of later documentation commits.
+Published and verified: [upstream-sync branch](https://github.com/peigongdsd/i915-sriov-dkms/tree/codex/upstream-sync-2026-10-02) and [ADL-P implementation branch](https://github.com/peigongdsd/i915-sriov-dkms/tree/codex/xe-adlp-2026-10-02). The report and validation records are published under `docs/xe-sriov/` on the implementation branch. The source commit and clean baseline above identify the reviewable code independently of later documentation commits.
 
 The incorrect rebase had placed `Wa_16010904313` in both the indirect context and the post-restore workaround batch. The backport carries the setup location through Xe's existing buffer-setup callbacks and emits the workaround once in the required location:
 
@@ -64,7 +64,7 @@ The next useful runtime comparison is baseline versus backport with identical fi
 
 | Area | Completed | Still unresolved |
 |---|---|---|
-| Upstream Xe | Acquired full official history, performed targeted source/diff review, committed the accepted Xe_LP backport, and passed the full Xe/compat build | Verify branch publication; validate the user's exact failure on hardware |
+| Upstream Xe | Acquired full official history, performed targeted source/diff review, committed the accepted Xe_LP backport, and passed the full Xe/compat build | Validate the user's exact failure on hardware |
 | Working i915 versus MTL Xe fork | Compared implementation and later recorded experiments; separated retained bring-up from reverted experiments | Windows composition artifacts, effective guest surface/cache/auxiliary state |
 | Mesa / Intel history | Read exact commits on Xe support policy, Xe_LP URB reservation, MTL AUX maps, PAT/coherency | Applicability to an observed failing allocation or workload |
 | Windows nested Hyper-V | Emulated original classifiers in both branches and reproduced a conditional 9033 resource-initialization rejection | Actual guest resource descriptors, full Windows/GPU behavior and identity with the older 8826 report |
