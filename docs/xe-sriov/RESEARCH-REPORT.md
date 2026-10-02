@@ -1,0 +1,507 @@
+# Intel SR-IOV research: ADL-P first, then MTL/ARL
+
+Progress report · revision 5 · updated 2026-10-02T19:52:41+08:00
+
+This report supports the concrete goal of fixing Linux Xe SR-IOV on **ADL-P first**, then MTL/ARL, with minimal migration of i915 internals. Windows guest-driver analysis is supporting evidence for separating failure causes. Confirmed source facts, published observations, diagnostic hypotheses, and untested proposals are kept distinct. No host driver has been installed, no live GPU configuration has been changed, and no hardware reproduction has been performed in this research session.
+
+## Current assessment
+
+**ADL-P already has upstream Xe SR-IOV enablement, but its first failing stage must be identified.** Current upstream includes the platform flag, VF/PF ABI handling, GGTT provisioning, legacy interrupt path, and GuC submission. A VF that times out while recording its default context fails before Mesa starts. That points first to the initial context/GGTT/GuC/reset/interrupt sequence, not to speculative Mesa fixes or a blanket claim that 39-bit DMA is invalid.
+
+**The older MTL attempt progressed further than its default branch suggests.** The fork's June 18 trace branch records accelerated Windows rendering with persistent composition/video artifacts, successful sampled GGTT writes, and completed invalidations. Those observations constrain the remaining investigation; they do not prove all mappings or cache policies correct.
+
+**The nested-virtualization startup failure has a separate, concrete Windows-driver lead.** Intel officially acknowledges misclassifying nested Hyper-V as a native Hyper-V host in [KB 000102878](https://www.intel.com/content/www/us/en/support/articles/000102878/graphics.html). A public July report describes an earlier skipped startup-state transition leading to `STATUS_INVALID_PARAMETER` and Code 43. Intel's live KB still says investigation is ongoing; a closed community issue is not evidence of a shipped fix.
+
+## Executive synthesis: Linux Xe repair, ADL-P first
+
+The first ADL-P implementation is now committed as `32d16259df98d7153daaa9b8c461c2eaa0d24394`, an exact backport of accepted Xe change `38631a7bce19`. It corrects duplicated Xe_LP timestamp-workaround emission in one existing Xe file. The full Xe and compatibility-module build against Linux 7.2.8 headers passed; no module has been installed or hardware-tested. No MTL code change is included. The source defect is established, while a repair of the user's particular failure remains unproven.
+
+**A Windows guest does not execute Linux VF `xe_lrc.c`.** This backport directly changes contexts created by the patched Linux Xe driver. Updating only the Linux PF does not apply that code to a Windows guest's privately constructed contexts, nor to an unpatched Linux guest. PF behavior can affect shared hardware, but a Windows improvement would need its own causal evidence. This distinction governs the first test plan and prevents a buildable Linux fix from being reported as a demonstrated Windows-vGPU repair.
+
+The design constraint is to reuse Xe's existing abstractions and relay transport. No new MTL relay protocol has been accepted as the plan. Future MTL work must distinguish existing guest wire-protocol compatibility handlers, shared Xe transport, and i915's older binder/coalescing internals. A path without PF mediation remains an explicit investigation question; Intel's affected-MTL workaround currently requires VF requests to go through the PF, so a direct-VF alternative needs contrary applicability, stepping or firmware evidence. The PF's permission to write GSM directly does not by itself grant that permission to its VFs.
+
+| Observed failure | Strongest current evidence | First discriminating check | Implementation direction if confirmed |
+|---|---|---|---|
+| ADL-P Linux VF fails its first default-context job | Current Xe performs GGTT kernel submission and an intentional reset before userspace; related Xe_LP reports include IOMMU/CAT errors | Match the first fault address to LRC/ring/HWSP/batch mappings; separate expected reset, context save, submission and interrupt completion | Correct Xe mapping ownership or context/reset setup through its existing BO, GGTT, GuC and RTP mechanisms |
+| ADL-P Linux VF starts, but a Windows VF does not | Upstream Xe_LP CCS0 policy differs from experimental DKMS; the Windows product lane also retains the nested-root classifier behavior | First hold nested Hyper-V inactive; compare engine enablement, GuC engine masks, saved register state and actual first guest submission | A narrowly gated engine/firmware contract change if proved; maintain engine-query/URB agreement for Linux guests |
+| VF starts until guest Hyper-V/VBS/WSL is activated | Intel acknowledges a classification defect; original 7092 and 9033 routines preserve native-root state for nested roots; 9033 also has a conditionally reproduced resource rejection | Compare VMX hidden, VMX exposed with Hyper-V inactive, and Hyper-V active before any L2 starts; capture CPUID and the exact startup branch | Correct earlier guest-driver environment/state resolution while retaining later validity checks; no Xe GGTT rewrite follows from this evidence |
+| MTL Windows accelerates but corrupts composition/video | The June fork records successful sampled updates and completed invalidations; declared i915/Xe PAT and MOCS tables already match | Locate one corrupt surface before presentation; trace its PPGTT, command/surface MOCS, AUX metadata and producer/consumer synchronization against working i915 | Preserve Xe-native MTL bring-up; repair the measured per-surface, per-engine or PF/GuC contract |
+| ARL is assumed equivalent to MTL | The current Xe PCI IDs share the MTL descriptor, but firmware/IP/stepping differ by SKU | Record device ID and graphics/media versions, then repeat the smallest MTL reproduction | Gate fixes by actual affected IP/stepping and validate each target |
+
+Three tempting shortcuts are specifically unsupported. Increasing ADL's DMA width does not follow from a PF-tagged IOMMU fault. Applying a blanket indirect-context-offset patch does not follow from an intermittent native-rendering hang or an inconclusive bisect. Replacing MTL's AUX-map architecture with Xe2 FlatCCS, or globally rewriting GGTT PAT indices, does not identify the defective Windows surface policy.
+
+The modern alternatives are already substantial: RTP entries feed GuC ADS register preservation, Xe supplies BO/VM_BIND and coherency machinery, shared-GGTT/per-GT provisioning exists, and firmware-authorized direct GSM access is a legitimate MTL PF backend. Remaining hardware and guest-protocol requirements should be expressed through those mechanisms. This study has produced narrowed targets and reproducible classifier evidence; it has not yet produced a hardware-validated repair for the user's ADL-P or MTL/ARL case.
+
+## Implemented ADL-P backport and validation status
+
+| Item | Recorded result |
+|---|---|
+| Clean upstream-sync base | `codex/upstream-sync-2026-10-02`, strongtz commit `f4cb98f4c28e1f3ac78ca88501a87c86d0c21a88` |
+| Implementation branch | `codex/xe-adlp-2026-10-02` |
+| Implementation commit | `32d16259df98d7153daaa9b8c461c2eaa0d24394` |
+| Accepted upstream source | `38631a7bce195b88814b93bf2b6d3e48c827fef2`, authored September 25, accepted October 1, 2026 |
+| Code delta | `drivers/gpu/drm/xe/xe_lrc.c`: 25 insertions, 13 deletions |
+| Build | **Passed, exit 0:** complete `xe.ko` and `intel_sriov_compat.ko` against Linux 7.2.8 development headers; GCC 16.2.0 and binutils supplied through a Nix build environment |
+| Runtime validation | No driver installation, module load, VF creation or hardware test performed |
+| Repository delivery | New branches prepared in the user's fork; SSH publication and final documentation commit pending verification |
+
+The build completed `MODPOST` and linked both modules without unresolved-symbol errors. The log records a missing optional Nix channel path, a `pahole` version warning, and skipped BTF generation because `vmlinux` was unavailable. Those environment limitations are retained in `patches/adlp/build-7.2.8.log`; build success establishes compilation/linkage for this kernel, not GPU correctness or all-kernel DKMS compatibility.
+
+Prepared publication targets, **not yet verified pushed at this revision**: [upstream-sync branch](https://github.com/peigongdsd/i915-sriov-dkms/tree/codex/upstream-sync-2026-10-02) and [ADL-P implementation branch](https://github.com/peigongdsd/i915-sriov-dkms/tree/codex/xe-adlp-2026-10-02). The report is intended for `docs/xe-sriov/RESEARCH-REPORT.md` on the implementation branch. The source commit and clean baseline above identify the reviewable code independently of later documentation commits.
+
+The incorrect rebase had placed `Wa_16010904313` in both the indirect context and the post-restore workaround batch. The backport carries the setup location through Xe's existing buffer-setup callbacks and emits the workaround once in the required location:
+
+| Engine class | Correct emission location |
+|---|---|
+| Render (RCS), compute (CCS) | Indirect context |
+| Copy (BCS), video decode (VCS), video enhancement (VECS) | Post-restore workaround batch |
+
+This retains the existing workaround applicability gate and Xe's context/buffer lifecycle. It introduces no i915 memory-management code, GGTT relay implementation, new platform-enablement flag or MTL workaround. The clean sync branch is the comparison baseline; the user's historical MTL branches remain separate.
+
+The next useful runtime comparison is baseline versus backport with identical firmware and settings. First test native Linux Xe and a Linux VF whose guest kernel also contains this patch, recording the first failing stage. Then test the Windows VF as a distinct PF comparison, with nested Hyper-V initially held inactive. The source correction does not by itself repair Windows' environment classifier or establish that a VF failure before context execution is caused by this workaround.
+
+## Work completed and work now underway
+
+| Area | Completed | Still unresolved |
+|---|---|---|
+| Upstream Xe | Acquired full official history, performed targeted source/diff review, committed the accepted Xe_LP backport, and passed the full Xe/compat build | Verify branch publication; validate the user's exact failure on hardware |
+| Working i915 versus MTL Xe fork | Compared implementation and later recorded experiments; separated retained bring-up from reverted experiments | Windows composition artifacts, effective guest surface/cache/auxiliary state |
+| Mesa / Intel history | Read exact commits on Xe support policy, Xe_LP URB reservation, MTL AUX maps, PAT/coherency | Applicability to an observed failing allocation or workload |
+| Windows nested Hyper-V | Emulated original classifiers in both branches and reproduced a conditional 9033 resource-initialization rejection | Actual guest resource descriptors, full Windows/GPU behavior and identity with the older 8826 report |
+| Official Windows packages | Both packages extracted; INF matches verified for ADL-P in 7092 and MTL/ARL in 9033; module hashes and classifier RVAs recorded | Map private state fields to complete startup control flow; match the user's actual installed driver |
+
+Official package evidence:
+
+| Package | Bytes | SHA-256 |
+|---|---:|---|
+| `gfx_win_101.7092.exe` | 780899944 | `9643cc60a899ceadf65df2ec80c17cdb69daeb41cdb2c9ccde0d214a79f968f8` |
+| `gfx_win_101.9033.exe` | 932338896 | `86d3ab3ef54610f6680c3649e63c9bac73a9df5e54f5dc7aba17f45c71b2e2bf` |
+
+### Independent Windows binary result: nested-root distinction is absent in the inspected classifier
+
+Both packages contain `Graphics/igdkmdn64.sys`. The 7092 INF is dated 2026-09-03 and includes ADL-P IDs such as `8086:46A6`; the 9033 INF is dated 2026-09-24 and includes MTL `7D40/7D45/7D55` and ARL `7D51/7D67` install sections. These are package compatibility checks, not proof that either is the user's installed driver.
+
+| Module version | Kernel-module SHA-256 | Classifier RVA | Observed object fields |
+|---|---|---|---|
+| 32.0.101.7092 | `454624942bf9a79a75fd1bfe6c6a2f8d499aabef45cb4268a1353d527902d098` | `0xB3A0` | state `+0xF28`, vendor `+0xF2C` |
+| 32.0.101.9033 | `2969ef18daf397b43353dd4ff465f52a8107fc1a612eab4a8cc2703dee919a4d` | `0xB680` | state `+0xE98`, vendor `+0xE9C` |
+
+The original machine-code routines were executed in isolated CPU emulation with controlled CPUID responses. The following values are raw internal fields, not official Intel enum definitions. An Intel CPU-brand input was used for the directly comparable cases.
+
+| Supplied environment | 7092 state / vendor | 9033 state / vendor |
+|---|---:|---:|
+| No hypervisor | `3 / 0` | `2 / 0` |
+| KVM | `0 / 5` | `0 / 5` |
+| VMware | `0 / 2` | Not separately run |
+| Hyper-V child partition | `0 / 3` | `0 / 3` |
+| Native Hyper-V root with management privileges | `3 / 3` | `2 / 3` |
+| Nested Hyper-V root with the same privileges and nesting bit available | `3 / 3` | `2 / 3` |
+
+For the Hyper-V root cases, these routines query CPUID `0x40000003` for privilege information but never query `0x40000004`, where Microsoft's TLFS defines EAX bit 12 to indicate that the hypervisor is nested within a Hyper-V partition. Both retain the same initial state for native and nested roots under the tested inputs. This independently corroborates the specific classification mechanism described in [Intel KB 000102878](https://www.intel.com/content/www/us/en/support/articles/000102878/graphics.html), with separate evidence for the ADL-generation and newer-generation packages. The differing state values and offsets show why a byte patch or offset from another driver version cannot be reused blindly. The traces also never query `0x40000001` for the `Hv#1` interface identifier. [Microsoft's feature-discovery specification](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/feature-discovery) reserves the vendor string for diagnostics and recommends interface identity for compatibility decisions. A proposed correction should check supported leaf ranges, preserve the real interface and privileges, and interpret the actually exposed nesting fields. EAX bit 12 is not a universal detector of nesting under every host vendor; its applicability to a particular KVM/Hyper-V stack needs a guest CPUID capture.
+
+**Correction to revision 3:** the 9033 image's `VF_CAP_REG` read at `0x254CF` is guarded by a platform selector that excludes MTL/ARL. Its presence in the image must not be presented as a read executed on those platforms. In 7092 the separately analyzed resource branch reads `0x1901F8`, checks bit 0, and sets its VF-mode field at `+0x56B98`; a nonzero hypervisor vendor then skips its corrective environment-state clear. The precise platform dispatch must be retained in interpreting either binary.
+
+The completed 9033 follow-up supplies a different and more directly relevant result. Device-ID dispatch maps MTL `7D45/7D55` to internal enum `0x4F8` and ARL `7D67` to `0x4F9`. Executing the original entire resource-parser routine at RVA `0x25080`, with Microsoft vendor 3 and VF-mode field 2, gives:
+
+| Synthetic Windows resources, tested separately for MTL and ARL | Environment state 0 | Environment state 2 |
+|---|---|---|
+| One 16 MiB memory descriptor | Success (`0`) | `STATUS_INVALID_PARAMETER` (`0xC000000D`) |
+| That descriptor plus a second 256 MiB memory descriptor | Success (`0`) | Success (`0`) |
+
+The second descriptor sets an alternate acceptance flag. Static call tracing connects the classifier and parser to the same initialization sequence, and follows the parser's error through its callers. This establishes a **conditional classification-to-resource-rejection path** in 9033. It does not establish the user's actual resource layout, prove that this is the public 8826 report's identical guard, or propose adding a fictitious PCI resource. Detailed evidence is in `windows/analysis/9033-findings.md`, `9033-resource-emulation.json` and `emulate_9033_resources.py`; the ADL-generation study remains separately recorded in `windows/analysis/7092/findings.md`.
+
+**Scope:** the isolated classifier routines and the 9033 resource-parser routine executed as original machine code under a CPU emulator. String/memory helpers, logging and stack-cookie checking were substituted for the classifier runs; the parser used synthetic Windows resource descriptors and controlled object fields, with logging/PCI-helper stubs where reached. The single-descriptor VF case reaches only the logging stub. Windows, GPU hardware, PF/VF communication and full driver startup were not simulated. These results do not prove the reported Code 43 on the user's machine or explain the separate MTL composition artifacts. They guide which guest CPUID and resource evidence to capture while the Linux ADL-P fix remains the implementation priority.
+
+Reproducible machine-readable records: `windows/analysis/7092/classifier-emulation.json` and `windows/analysis/9033-classifier-emulation.json`. The 7092 module's PE version metadata independently reports `32.0.101.7092` and its embedded CodeView/PDB identifier was retained in `windows/analysis/7092/metadata.json`; an embedded PDB reference is not a recovered private symbol file. Exact GUID-plus-age lookups for both module PDBs on Microsoft's public symbol server returned HTTP 404; no private symbols were recovered. That server response does not prove that symbols do not exist elsewhere.
+
+## Research priorities
+
+1. ADL-P first: publish the committed, build-validated accepted workaround backport and run the matched runtime comparison. Identify whether the user's first failure is VF probe, initial submission, or Windows-only initialization; a Windows guest does not run the patched Linux VF context code.
+2. For ADL-P testing, record the exact kernel, GuC and guest-driver identities, then compare one VF under matched i915 and Xe PF conditions. Preserve current Xe BO/GGTT/GuC/RTP machinery and screen older builds for already-fixed workaround defects.
+3. Only after the ADL-P phase, return to MTL/ARL. Study the existing Xe relay transport, compatibility handlers for existing guest requests, and the evidence required for a path without PF mediation. Keep accepted modern MTL fixes recorded for that phase rather than mixing them into the first patch.
+4. Use Windows classifier/resource results as a separate diagnostic control for nested-only failures. Match real CPUID and resource descriptors before attributing a current guest failure or modifying private state logic.
+
+
+## Detailed source investigations
+
+The following chapters retain the detailed findings and citations collected so far. Historical support statements are dated; current source status takes precedence over older policy tables. The combined report incorporates subsequent evidence explicitly; the individual source notes remain available as separate research records.
+
+
+---
+
+## Upstream Xe SR-IOV: ADL-P source audit
+
+Audited 2026-10-02. Upstream Linux checkout: `sources/linux`, commit `ce1e0223d8ad4211275c82a17ed6d43ab81e13d9`, committed 2026-10-01T12:47:16-07:00. All Linux paths and line numbers below refer to this immutable snapshot. No runtime changes or hardware tests were performed.
+
+### Status and what Intel actually enabled
+
+`drivers/gpu/drm/xe/xe_pci.c:263` defines ADL-P with `.has_sriov=true`, `.require_force_probe=true`, 39-bit DMA, 48-bit GPU VA, one GT per tile, LLC and cached page tables. ADL-S/N and TGL have the same important properties. Raptor Lake U is an ADL-P subplatform. Therefore current upstream is not missing the basic ADL enablement flag.
+
+Intel commit [2e761039985271a69bf6eada8f236701f8594638](https://github.com/torvalds/linux/commit/2e761039985271a69bf6eada8f236701f8594638), authored 2025-07-22, promoted ADL/ATSM from the CI topic branch and `CONFIG_DRM_XE_DEBUG` gating. Its rationale was that CI had already exercised these platforms, and that `require_force_probe` remained an explicit guard. This supersedes the June 2025 support-status question saying ADL SR-IOV was CI-only.
+
+Intel commit [6983ea9cd720fdd409b4944caf9605731323bb8d](https://github.com/torvalds/linux/commit/6983ea9cd720fdd409b4944caf9605731323bb8d) adds TGL similarly; Intel specifically says TGL was used during feature development but lacked official SR-IOV CI coverage.
+
+That is development availability, not production support. Intel's Matt Roper reiterated in [2026-09-30 review](https://lkml.rescloud.iu.edu/2609.3/17001.html) that Xe1/ADL force-probe support targets driver developers and might lack hardware workarounds. His statement should not be conflated with the separately true `.has_sriov=true` status.
+
+MTL descriptor `xe_pci.c:384` has no `.has_sriov` and is also force-probe. This is a distinct enablement problem. ADL's 39-bit DMA versus MTL's 46-bit DMA does not establish a DMA bug; supported upstream ADL/TGL descriptors deliberately use 39 bits.
+
+### PF/VF initialization and actual mechanisms
+
+1. `xe_sriov.c:62` recognizes VF through `VF_CAP_REG` and PF through PCI/runtime readiness, conditional on platform capability. A hardware-advertised capability with `has_sriov=false` is explicitly suppressed.
+2. ADL-P PF selects `i915/adlp_guc_70.bin` with recommendation 70.44.1 (`xe_uc_fw.c:117`). Filename major selection and recommended version are distinct; inspect the loaded firmware, not package age. VF does not upload its own independent GuC.
+3. VF minimum GuC interface is 1.1 for TGL through PVC (`xe_gt_sriov_vf.c:170`); newer families require at least 1.2 for GMD_ID discovery. PF/VF relay ABI currently negotiates 1.0 (`abi/guc_relay_actions_abi.h:20`, `xe_gt_sriov_vf.c:826`). Firmware release number, GuC submission ABI, and PF/VF relay ABI are separate version spaces.
+4. The PF supplies fuse/runtime register data; TGL/ADL use the gfx1200 runtime table (`xe_gt_sriov_pf_service.c:20`, `:118`). VF MMIO reads not marked VF-accessible go through its cached virtual view (`xe_mmio.c:231`). Topology is therefore not simply unrestricted guest MMIO probing.
+5. ADL already receives the required PF `VIRTUAL_CTRL_REG.GUEST_GTT_UPDATE_EN` write (`xe_gt_sriov_pf.c:140`). PF assigns GGTT space using PTE VFID bits and the PRESENT bit (`xe_ggtt.c:943`). VF uses only its provisioned GGTT interval (`xe_ggtt.c:411`), then direct GSM MMIO PTE updates (`xe_ggtt.c:238`). There is an explicit posted-write read and TLB invalidation (`xe_ggtt.c:577`).
+6. System memory buffers use DMA API mappings (`xe_bo.c:403`); the device applies the configured DMA mask (`xe_device.c:702`). A trace must distinguish CPU physical addresses, DMA/IOMMU IOVAs, GGTT addresses, and PPGTT GPU VAs. Increasing 39 to 46 is not a justified repair.
+7. ADL-P VF IRQ is supported without memory-based interrupts: `vf_irq_reset` has the gfx<1210 register interrupt path (`xe_irq.c:627`). The warning that migration requires memory-based IRQ says migration is disabled; it does not say basic SR-IOV execution is unsupported.
+
+### Earliest GPU execution is the right localization point
+
+`xe_gt_record_default_lrcs()` (`xe_gt.c:385`) creates a kernel queue with `vm=NULL` (`:409`), submits the workaround/state initialization batch (`:417`), then submits a NOP on another queue (`:424`) to force the first context image to be saved. This becomes the template for future contexts.
+
+The batch is from the kernel BB pool and GGTT mapped. `get_ppgtt_flag()` (`xe_ring_ops.c:272`) returns zero for `vm=NULL`. Accordingly, an `emit_wa_job -ETIME` during VF probe is not evidence of a failed userspace VM_BIND or Mesa PPGTT mapping: the basic GGTT/context/GuC/interrupt path already failed before that.
+
+One actual source difference worth an isolated experiment: i915 initializes PPGTT registers even for a GGTT context by using its GGTT alias VM (`sources/i915-sriov-dkms/drivers/gpu/drm/i915/gt/intel_lrc.c:912`, `:972`); Xe only sets PPGTT root when a VM exists (`xe_lrc.c:1526`). That does **not** prove the NULL root is wrong: these jobs are GGTT, restore inhibit and GuC handle other context state. If implicated by fault address/register captures, use an Xe scratch/kernel VM and existing page-table helpers rather than importing i915 VM lifetime code.
+
+The [ADL-S UHD770 first-person issue #454](https://github.com/strongtz/i915-sriov-dkms/issues/454) reports VF `emit_wa_job -ETIME`, PF-attributed IOMMU write fault and engine CAT error while i915 works. It corroborates the stage of failure on a related Xe_LP platform, not the cause on ADL-P. Its assertion that only 46-bit/newer hardware is enabled is contradicted by upstream source. “Next page table ptr is invalid” here is a DMAR/IOMMU report, not by itself a GPU PPGTT root diagnosis. PF requester identity during the VF's first job makes address ownership/VFID/context switching worth tracing, but hardware requester routing can also differ by transaction type.
+
+### Two current context changes to account for
+
+#### Clean NULL context reset: already upstream
+
+[61e7649a1a253609769063a30018e68b970324d6](https://github.com/torvalds/linux/commit/61e7649a1a253609769063a30018e68b970324d6), Intel, March 2026, explains that another VF's modified context might remain when capturing the default image. It adds a deliberately impossible watchdog condition so GuC resets the engine before capture.
+
+Current `xe_gt.c:377` passes `force_reset=true` for VF initial WA jobs. `xe_ring_ops.c:306` emits the watchdog and GGTT semaphore. Therefore, on recent kernels the earliest submission includes an intentional reset; seeing an engine-reset event there is not by itself the defect. Failure to complete/recover, CAT errors, or repeated reset storms are defects. A narrow diagnostic split is to trace this sequence separately from subsequent workaround instructions and fence signalling. Do not simply delete it as a fix: that reintroduces contaminated default contexts.
+
+#### ADL indirect-context offset: pending and disputed
+
+[c9dfd66cb91ef32f76e51f75e315c07907df2b85](https://github.com/torvalds/linux/commit/c9dfd66cb91ef32f76e51f75e315c07907df2b85), Intel, September 2025, removed explicit default-offset programming while extending indirect contexts to more engines, on the premise the hardware default was already appropriate.
+
+Current `xe_lrc.c:1452` still leaves INDIRECT_CTX_OFFSET at its inherited value. The September 30, 2026 proposal to restore programming reports ADL Vulkan/ANGLE hangs. [Intel's initial review](https://lkml.rescloud.iu.edu/2609.3/17001.html) expected reset value 0xd to survive restore-inhibit and context capture, and requested default-LRC dumps. The [author's October 1 follow-up](https://www.mail-archive.com/dri-devel@lists.freedesktop.org/msg640961.html) then supplied an RCS default-context dump containing `0x21c8 = 0` and cited the PRM distinction: engine-context restore inhibit does not inhibit ring-context restoration. This new evidence narrows the dispute and supports checking the actual saved register rather than relying on the expected reset default. Inspect dword 0x17 in the register-state portion/default-LRC dump, respecting the dump's offsets and affected engine. This remains a proposed native-ADL context repair, not an accepted or demonstrated SR-IOV fix. The proposed `GRAPHICS_VER < 20` condition is broader than the ADL-only title; do not apply it indiscriminately.
+
+The related [Mesa CI tracker item 7584](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/7584) supplies an important limit: on April 9 the reporter initially implicated `c9dfd66cb91e`, then withdrew confidence after the parent also timed out. July 1 still reports failure on 7.1.1 despite the idledly-unit correction. That incomplete bisect does not establish the cause of the CI hang, and neither the CI hang nor the later RCS register dump establishes the cause of an SR-IOV first-job failure. Keep the measured context-register issue as a controlled hypothesis.
+
+### CCS distinctions and avoiding unnecessary legacy ports
+
+Compute Command Streamer (CCS engine) and Compression Control Surface (CCS metadata) are different things.
+
+Upstream `graphics_xelp` (`xe_pci.c:57`) includes RCS0 and BCS0, not CCS0. Media engines are added separately. Its CCS hardware-enable rule starts at gfx1255 (`xe_hw_engine.c:454`), leaving ADL compute-engine support disabled.
+
+Current strongtz snapshot adds experimental Xe_LP CCS0 only under `xe.xelp_enable_ccs=true` and then reduces GPU VA to 47 bits (`sources/strongtz-current/drivers/gpu/drm/xe/xe_pci.c:884`, `:971`). This opt-in is not an upstream module parameter. It is potentially relevant to a Windows driver expecting CCS engine resources, not automatically a cure for a Linux upstream VF probe failure.
+
+Intel's [78b8d6d05ad0, “Move CCS enablement to engine setup RTP”](https://github.com/torvalds/linux/commit/78b8d6d05ad0) explains both design choices explicitly: Xe_LP physically has a CCS engine, but upstream i915/Xe had never enabled it because of other issues; the rule therefore starts at Xe_HP. The same commit removes manual RCU_MODE insertion into GuC ADS because registers programmed through RTP are added automatically. This supports a modern, centrally described setup/reset contract rather than copying an old manual ADS list.
+
+i915 explicitly adds GEN12_RCU_MODE to its GuC ADS register-save list when CCS is present (`sources/i915-sriov-dkms/drivers/gpu/drm/i915/gt/uc/intel_guc_ads.c:395`). Current Xe serializes RTP-generated `hwe->reg_sr` entries into ADS (`xe_guc_ads.c:851`). Inspect the resulting list and reset domain if adding a narrowly gated Xe_LP rule; symbol-name absence is not evidence that register preservation is missing.
+
+i915 fork's GUC_WA_RCS_CCS_SWITCHOUT bit is restricted to gfx12.70–12.74 and the fork's enable switch (`.../intel_guc.c:321`). It is absent in upstream Xe, but it is not an ADL-P workaround. Xe retains POLLCS for pre-XeHP (`xe_guc.c:202`).
+
+i915 GGTT binder/relay condition is media13.0 plus unavailable direct stolen access (`sources/i915-sriov-dkms/drivers/gpu/drm/i915/gt/intel_gtt.c:24`), so the MTL workaround is not an ADL-P architectural gap. ADL i915 also uses direct GGTT writes. Keep MTL's binder investigation separate.
+
+### Recommended experiments, ranked by diagnostic value
+
+1. Pin exact host/guest driver commits and firmware; classify whether failure is during VF probe, first user submission, Windows device initialization, or later rendering. “Recent” cannot distinguish NULL-context reset changes or DKMS CCS policy. For an older Xe build, first check the two confirmed Xe_LP `Wa_18022495364` corrections (`051be4913397`, `0df99689eb79`) and the failure-specific reset fix (`1b81ed612e12`), described below. All are already in the pinned October source; reapplying them cannot explain a failure on that snapshot.
+2. One VF, host driver binding first if reproducible there: instrument initial LRC/BB/ring/HWSP DMA addresses, GGTT offsets, PF-owned PTEs and VFID, GuC context ID and actual engine. Match the *first* DMAR address to these objects. Trace expected watchdog reset, context save, subsequent WA execution and completed sequence number separately. This separates mapping/ownership, context-state and interrupt failures.
+3. Compare captured default LRC register values with i915 and the expected reset defaults, especially INDIRECT_CTX_OFFSET and PDP root, but do not assume either is causal. On a failed probe capture before cleanup, since a completed default-LRC file may never exist.
+4. Test independent queue variants (GGTT NOP; same with scratch Xe VM; actual WA batch; reset sequence) to identify the first failing transition. Retain current Xe abstractions. These are diagnostic patch ideas, not validated fixes.
+5. If failure is Windows-only after a Linux VF succeeds, evaluate the separate CCS0 exposure/enable/reset contract with 47-bit VA using the current DKMS work as a controlled comparison. Do not mix that with compression modifiers.
+6. For Linux rendering after probe succeeds, investigate Mesa capability and AuxCCS support then. Kernel AuxCCS handling recently changed in March 2026: [quiesce traffic](https://github.com/torvalds/linux/commit/458b1e64e7c0594cca8515fae8996bc52619d2f6), [wait for invalidation](https://github.com/torvalds/linux/commit/cd1a516234ebb049007ce20c6b6e76936b29bade). These cannot fix a kernel module failing its initial golden-LRC job before Mesa starts.
+
+No source review alone settles the user's ADL-P failure. The highest-value result is a narrower experiment set and rejection of unsupported broad explanations (39-bit DMA intrinsically broken; MTL binder required on ADL; Mesa causing pre-probe kernel failures).
+
+### Authoritative Xe development tree and issue tracker follow-up
+
+The project URL provided by the user is reachable directly via HTTPS/REST (GitLab project ID 13578), even where the web-search tool returns an internal error. The default `main` branch is a README pointer; the actual development branch is `drm-xe-next`. Verified current heads:
+
+- `drm-xe-next`: `cf4171a20d13918e07ed01a1e01a6b546825c601`, 2026-10-01, GuC suspend-pending race fix.
+- `drm-xe-fixes`: `72207463f7a4a6818a88f4ef57802b42da534301`, 2026-09-28, keep VF LMEM BAR small when no VFs enabled (dGPU resource allocation).
+- `topic/xe-for-CI`: `b275cb3f07a7ab3ef3bd419db86bd42fa95dcedb`, 2026-07-09.
+
+Source `xe-next-pci.c` fetched through the official API confirms the same relevant platform split on the latest next branch: ADL-P has SR-IOV and force-probe; MTL descriptor still lacks SR-IOV; ARL IDs select that MTL descriptor. These were not inferred solely from Torvalds' tree. The newest 100 path-scoped commits were saved to `xe-next-latest-commits.json`. The subsequently completed full-history traversal identified the accepted Xe_LP workaround correction and the separate future MTL/ARL coherency fix documented below; the initial title scan was not sufficient to assess missing fixes.
+
+Saved issue searches include ADL, SR-IOV, sriov, emit_wa_job, Windows, Hyper-V, and IOMMU. Title search is needed because otherwise many unrelated platform logs contain SR-IOV text. A search result or same error signature is not sufficient to assign causality.
+
+Read [work item 8354](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/8354) including discussion: this is a VF stress-test `emit_wa_job -ETIME` issue on WCL, later PTL/NVL, **not ADL-P**. It was automatically closed on 2026-09-09 after being unseen for 21 days; no identified fix is given. Item 3075 reports the same timeout during dGPU wedged testing in 2024; also not ADL-P. Item 6420 is an N100 display/boot blank-screen report, not VF passthrough. They should not be repurposed as confirmation of the user's failure.
+
+GitLab REST `/issues/IID/notes` currently returns 401 unauthenticated, but the public web UI endpoint `/drm/xe/kernel/-/issues/IID/discussions.json` supplies the public discussion. File `xe-item-8354-discussions.json` preserves this read. No account authentication or tracker writes were performed.
+
+Further full-discussion findings:
+
+- [6489](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/6489): November 2025, i5-12500H ADL-P heavy-3D stutters under Xe but not i915. Intel's Jani Nikula says i915 is the supported driver and Xe/ADL-P was a development vehicle. This is a support-policy statement, not proof SR-IOV cannot work.
+- [7584](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/7584): Mesa CI ADL-P/RPL-U Vulkan hangs, initially reported as 6.17 to 6.19 regression. Crucially, on 2026-04-09 the reporter first implicated `c9dfd66cb91e`, then withdrew confidence after reproducing on its parent. July 1 reports persistence in 7.1.1. Thus the bisect does not prove the indirect-context-offset patch is the cause. These are bare-metal rendering failures, not VF-probe failures. The mentioned partial fix is [7596459f3c93d8d45a1bf12d4d7526b50c15baa2](https://github.com/torvalds/linux/commit/7596459f3c93d8d45a1bf12d4d7526b50c15baa2), correcting idledly unit conversion; it was already present in that still-failing 7.1.1 report.
+- [7352](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/7352) and [7733](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/7733) really do show ADL-P RVP SR-IOV CI failures, but in the `xe-vfio-pci` FLR/reset path (NULL dereference), not initial render execution. These distinguish VFIO migration/reset plumbing from the guest renderer, and show that upstream ADL-P CI use is real despite the end-user support limitation.
+
+
+### Development-tree fixes and the first Linux candidate
+
+Complete history and patch-content comparison exposed a difference missed by the initial latest-commit title scan:
+
+- [38631a7bce195b88814b93bf2b6d3e48c827fef2](https://gitlab.freedesktop.org/drm/xe/kernel/-/commit/38631a7bce195b88814b93bf2b6d3e48c827fef2), accepted October 1, fixes double emission of `Wa_16010904313` on Xe_LP. RCS/CCS should receive it through the indirect context; BCS/VCS/VECS through post-restore handling. It is absent from the pinned Torvalds snapshot `ce1e0223d8ad...`. This accepted fix has now been backported as implementation commit `32d16259df98d7153daaa9b8c461c2eaa0d24394`; its build/runtime boundary is recorded above.
+- [d5b0bf3f37f152583a884c696cf6caa152aa7ed5](https://gitlab.freedesktop.org/drm/xe/kernel/-/commit/d5b0bf3f37f152583a884c696cf6caa152aa7ed5) adds `Wa_22016122933` for media GT 13.00 on MTL/ARL: GuC shared memory must be uncached. Its author reports extended testing on two ARL machines. It is also absent from the pinned Torvalds snapshot, and is recorded for the **later MTL/ARL phase**, with no implementation in the ADL-P patch.
+- The ring-WC ordering change `136360290f31` initially appeared missing when comparing hashes, but equivalent Torvalds commit `9f83c94469ff` is already present. It must not be reapplied as a newly missing fix. Branch SHA inequality is insufficient; patch-content equivalence must be checked.
+
+### Additional confirmed fixes found through complete commit-history traversal
+
+The following are established changes, useful for testing what a report means by “recent.” They are already present in the pinned October 2026 upstream source; none proves the cause of a failure there.
+
+- [051be4913397](https://github.com/torvalds/linux/commit/051be49133971076717846e2a04c746ab3476282), January 2026, fixes XeLP Wa_18022495364 programming the wrong register: CS_DEBUG_MODE1 becomes CS_DEBUG_MODE2. [0df99689eb79](https://github.com/torvalds/linux/commit/0df99689eb790bcad3ad82b38fa4ce1cbf3cffa3), April 2026, fixes the same workaround's missing engine-relative MMIO bit in MI_LOAD_REGISTER_IMM. Current `xe_lrc.c:1241` contains both corrections. These concrete errors warrant screening older reports before proposing further speculative default-context changes.
+- [f2f90989ccff](https://github.com/torvalds/linux/commit/f2f90989ccff2d010472d47e4e62f7afe8ce67ff), March 2025, explicitly fixes VF workaround initialization by performing register read/modify/write on the engine with MI_MATH instead of CPU reads that fail for a VF. Thus current Xe already has a modern VF-safe workaround execution mechanism; importing i915 CPU-MMIO assumptions would regress that property.
+- [e904c56ba6e0](https://github.com/torvalds/linux/commit/e904c56ba6e0d4eff5f48a70356fd5d764c2a966), February 2026, replaces VF GGTT balloon objects with direct GGTT start/size initialization. Its message says the previous scheme worked but was complicated. Missing old ballooning objects is therefore an intentional modernization, not absent virtualization support.
+- [1b81ed612e12](https://github.com/torvalds/linux/commit/1b81ed612e12ea9df8c5cb6f0ddd4419fd0b8ac8), April 2026, explicitly closes ADL-P work item 7352. `xe-vfio-pci` had initialized fields needed for reset only when migration was supported, causing a NULL dereference on ADL-P's non-migratable VF. It decouples VF initialization from migration initialization. This is a confirmed ADL-P SR-IOV defect and fix, with a precisely different failure signature from an `emit_wa_job` GPU timeout.
+- [d1643db3b037](https://github.com/torvalds/linux/commit/d1643db3b037b57f2af7f85c3821d6fe69c492f6), August 2026, ensures the VF calls `xe_guc_submit_enable()` and applies render/compute scheduling policy before recording default LRCs. The actual policy KLV is conditional on `CCS_INSTANCES` (`xe_guc_submit.c:356`), so this is relevant to CCS-enabled platforms/experiments, not a strong default-upstream ADL-P explanation where CCS0 is absent. [26caeae9fb48](https://github.com/torvalds/linux/commit/26caeae9fb482ec443753b4e3307e5122b60b850) explains modern GuC dual-queue/yield policy. For MTL, audit this current mechanism before proposing the old RCS_CCS_SWITCHOUT flag as a replacement. The newer scheduling policy and the older platform workaround must not be assumed semantically equivalent without checking the actual firmware contract and emitted KLVs.
+
+The post-migration LRC re-creation fixes `c692ae39e9fd` and `f3fb5f1ebbf3` concern contexts raced by VM migration; they should not be promoted to explanations for the first cold-boot ADL-P VF probe without evidence of migration/recovery.
+
+
+### Full-history acquisition and scope, completed 2026-10-02
+
+`sources/xe-development` is a no-checkout, blob-filtered Git repository with **full commit and tree history**, not a shallow clone. It was seeded with Torvalds' full repository for efficient object transport, then fetched all official `https://gitlab.freedesktop.org/drm/xe/kernel.git` branch refs and tags. `origin` is the authoritative Xe remote; `linux-upstream` records the Torvalds transport source. Source blobs are retrieved lazily when examining patches; filtering file contents does not truncate commit ancestry.
+
+Verification: `git rev-parse --is-shallow-repository` returned false; complete commit traversal succeeded. The snapshot has 16 official Xe branches and 226 advertised tags, 1,490,234 commits reachable from official branch refs including Linux ancestry, and 1,502,905 across all fetched refs including tags and Torvalds. Advertised exact refs are preserved in `xe-full-advertised-refs.txt`, local official branch refs in `xe-full-official-refs.txt`.
+
+`xe-complete-path-history.tsv` indexes all 21,754 non-merge commits touching `drivers/gpu/drm/xe` across these refs, including historical rebases. Scoped searches produced 562 SR-IOV/PF/VF matches, 682 ADL/XeLP/MTL/ARL matches and 47 VF-context/IRQ matches (duplicate/cherry-picked changes are retained). `xe-development-unmerged-history.log` records the 240 commits reachable from next/fixes/CI but not the pinned Torvalds branch by identity; as the ring-barrier example shows, that does not imply 240 unique unapplied patches.
+
+These are full-history acquisition and targeted commit-message/diff traversal, **not a claim that all Linux commits or all 21,754 Xe diffs were manually reviewed**. The source conclusions above were checked at the pinned source and the relevant authoritative development commits. This acquisition and tracker research was read-only. The separately authorized new-branch implementation/publication is recorded in the implementation section above; no tracker messages were posted.
+
+
+---
+
+## Intel statements, Mesa implications, and modern implementation boundaries
+
+Research date: 2026-10-02. No runtime or configuration modifications. This note separates verified source statements from diagnostic inferences. Mesa source snapshot: `9046ec144bbb18a2cfbb7719adf19303b710a2c3` (main at retrieval, committed 2026-10-02 09:56 UTC). Retrieved source and API responses are under `sources/mesa/`.
+
+### What Intel actually said about platform support
+
+1. José Roberto de Souza's Mesa commit [31920cb60c3cf487bc29ebd1d8ad8b1825e09fab, “intel: Enable Xe KMD support by default”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/31920cb60c3cf487bc29ebd1d8ad8b1825e09fab) (2024-03-12, MR 20418) removed the build-time gate because the upstream Xe userspace ABI had stabilized, while retaining experimental status for platforms older than Lunar Lake. This is not removal of ADL/MTL support. Current `intel_device_info.c:1981-1986` still calls the Xe query backend and prints a warning for `verx10 < 200`; the warning does not itself reject the device.
+2. Intel SR-IOV maintainer Michal Wajdeczko [answered on 2025-07-01](https://lkml.iu.edu/2507.0/01102.html) that pre-LNL Xe platforms were not officially supported, so SR-IOV was enabled only on SDV platforms actively tested in public CI (ADL and ATS-M). He described TGL enablement as adding `has_sriov`, but robust MTL enablement as requiring considerably more SR-IOV-specific code and prior native-mode testing. This establishes a support/testing boundary; it does not establish hardware impossibility or specify which MTL changes are unavoidable.
+3. Intel's Matt Roper [reiterated on 2026-09-30](https://lkml.rescloud.iu.edu/2609.3/17001.html) that ADL force-probe support was intended for kernel developers and could lack ADL hardware workarounds. This is current, direct evidence that native Xe success should be tested before attributing every VF failure to SR-IOV.
+
+### ADL-P: the compute engine bit is a cross-layer contract
+
+The exact Mesa contribution to inspect is [a364f23a6cfa28e1843ef1e64dce56b4cef5a71e, “intel: Make gen12 URB space reservation dependent on compute engine presence”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/a364f23a6cfa28e1843ef1e64dce56b4cef5a71e), by José Roberto de Souza (MR 21031). Its message explains that `RCU_MODE::Compute Engine Enable` is a global control for dual-context operation and that hardware reserves URB resources when it is set. Mesa subtracts **4 KiB per L3 bank** for Gfx12.0 only when the engine query reports a compute engine. At the time, Intel said the kernel did not enable dual context on these platforms, but anticipated that this could change.
+
+The diff sets `has_compute_engine` from the KMD's queried engine list for both Iris and ANV, then changes `intel_get_urb_config()` to subtract the reservation only when that field is true. This means a patch that silently sets the physical CCS enable bit while hiding CCS from the engine query can produce an inconsistent memory layout. Conversely, reporting CCS without valid hardware setup/context save semantics is not sufficient. This is a **source-supported diagnostic inference**, not a diagnosis of the user's unobserved failure.
+
+The earlier Intel contribution [81d6ae31, “anv, iris: Enable compute engine with INTEL_COMPUTE_CLASS=1”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/81d6ae31) introduced opt-in compute-engine usage (MR 14395). Engine support and compute API availability must not be conflated: compute workloads can execute on a render command streamer. Do not treat “OpenCL/Vulkan compute works” as proof that a separate CCS engine works.
+
+Suggested comparison fields across native Xe, Xe VF, and working i915 VF: physical dual-context/CCS enable state; GuC engine masks; queried render/compute engine list; GuC ADS register save/restore list; default RCS/CCS LRCs; Mesa `has_compute_engine` and computed URB size. Keep CCS = compute command streamer distinct from CCS = compression metadata.
+
+### A proposed ADL context-image correction deserves a controlled test
+
+Helen Koike posted “drm/xe/lrc: Restore CTX_CS_INDIRECT_CTX_OFFSET programming for ADL” on 2026-09-30, identifying [c9dfd66cb91e, “drm/xe/lrc: Allow INDIRECT_CTX for more engine classes”](https://github.com/torvalds/linux/commit/c9dfd66cb91e) as the change after which ADL IntelAngleEnd2EndTestCases sporadically returned `VK_DEVICE_LOST`. This is a proposed fix under discussion, **not a verified merged fix for SR-IOV**.
+
+The [Intel review](https://lkml.rescloud.iu.edu/2609.3/17001.html) initially reasoned that restore-inhibit plus a context switch should preserve the hardware default and asked to inspect `default_lrc_*`, specifically dword offset `(0x16 + 1)`, and to identify affected engines. The [author's October 1 reply](https://www.mail-archive.com/dri-devel@lists.freedesktop.org/msg640961.html) distinguishes **ring context** from **engine context**, cites the TGL PRM, and provides an actual RCS default-context dump with register `0x21c8 = 0x00000000`. Her explanation is that engine restore inhibit does not inhibit ring-context restoration, so zero can be restored before default capture.
+
+This is a sharper lead than generic speculation about bad context images: compare the exact default LRC field and the presence of c9dfd66 in the failing build. The patch's broad `< 20` guard and engine-specific defaults were also questioned; do not copy a single RCS value across every engine/platform. Importantly, **INDIRECT_CTX workaround batches are not the same feature as Xe's Indirect Ring State page**. The latter's 2024 enabling and later GuC ADS engine-state-size fix are separate topics.
+
+The associated [item 7584 discussion](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/7584) explicitly retracts confidence in the initial `c9dfd66` bisect after its parent also failed. The later zero-valued register dump is separate, more specific evidence; it does not rehabilitate that bisect or prove an SR-IOV root cause.
+
+### MTL/ARL: compression architecture differs from Xe2
+
+Intel's Mesa [MR 20322 commits](https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/20322) provide a concise platform-specific explanation:
+
+* [6e33423a6fabca16587a3fada6b74530fb07a57b, “intel/dev: Enable AUX map on MTL”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/6e33423a6fabca16587a3fada6b74530fb07a57b), Jianxun Zhang.
+* [f81579628a60de73146c9bc5b774b83a63489a4a, “intel/aux_map: Ignore format bits when using tile-4”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/f81579628a60de73146c9bc5b774b83a63489a4a), Jordan Justen: MTL uses an AUX translation map again, but Gfx12.5+ reads compression format from surface state and ignores format bits in AUX-map metadata. Tile4 replaces Y tiling for this path.
+* [5df50292d60dd77f38a19f5b3f7568a7a83d7cd1, “intel/isl: Disable CCS on MTL until B0 (Wa_14017353530)”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/5df50292d60dd77f38a19f5b3f7568a7a83d7cd1): an early-stepping workaround, not a blanket statement that production MTL cannot compress.
+
+Consequently, Xe2 SR-IOV FlatCCS support must not be assumed to solve MTL AUX translation. ADL also has an AUX-map path, so AUX-map existence alone does not explain why MTL needs more work. The relevant MTL contract includes per-context AUX table state, per-engine invalidation, media/render relationships, and the real architecture's cache attributes. Whether any particular missing item causes the user's failure still requires tracing.
+
+Current Mesa `genX_init_state.c` programs AUX table base registers from userspace when `has_aux_map`; `genX_cmd_buffer.c` invalidates per-engine AUX caches. These are existing userspace mechanisms to preserve, not reasons to transplant old i915 memory management wholesale. Source snapshot links: [initial state](https://gitlab.freedesktop.org/mesa/mesa/-/blob/9046ec144bbb18a2cfbb7719adf19303b710a2c3/src/intel/vulkan/genX_init_state.c), [command buffers](https://gitlab.freedesktop.org/mesa/mesa/-/blob/9046ec144bbb18a2cfbb7719adf19303b710a2c3/src/intel/vulkan/genX_cmd_buffer.c).
+
+### PAT, CPU coherency, and scanout are already modern Xe contracts
+
+[500e037661e369927aeee0c1c5cb41fb8b946d4b, “intel: Add PAT entries for gfx12 and newer”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/500e037661e369927aeee0c1c5cb41fb8b946d4b), José Roberto de Souza, explicitly states that Xe requires PAT selection on every supported platform. [29d4d2640677d3cba4fa32acbe4c6e1109999e1a](https://gitlab.freedesktop.org/mesa/mesa/-/commit/29d4d2640677d3cba4fa32acbe4c6e1109999e1a) explains keeping PAT, CPU mmap mode, and BO coherency requirements together in platform information. This favors using Xe's existing BO + VM_BIND/PAT model and correctly adapting platform tables over importing i915 GEM caching APIs.
+
+[0d668f50dc88f06100513abe2ef0fe379ed0ed27, “intel: Update MTL scanout PAT entry”](https://gitlab.freedesktop.org/mesa/mesa/-/commit/0d668f50dc88f06100513abe2ef0fe379ed0ed27) changed the scanout policy because preceding integrated GPUs had noncoherent GT and display caches and Intel had not established that MTL changed this. This directly supports testing scanout/composition separately from offscreen render success. It does not prove that a Windows guest DWM defect is a PAT defect.
+
+### Discriminating tests, in order
+
+1. Establish native Xe and headless VF kernel submission correctness with the same kernel/firmware versions, by engine. If the guest cannot reach driver initialization or the first tiny submission, Mesa compression tuning is downstream of the failure.
+2. Query engines/topology/configuration through the guest Xe uAPI. Current Mesa's Xe device-info backend refuses missing geometry-DSS or EU masks; the experimental warning itself is not a blocker. Source [xe/intel_device_info.c](https://gitlab.freedesktop.org/mesa/mesa/-/blob/9046ec144bbb18a2cfbb7719adf19303b710a2c3/src/intel/dev/xe/intel_device_info.c).
+3. Record physical enable state versus published engine list and URB reservation. Test RCS-only scheduling separately from CCS opt-in, with known correspondence between PF and VF assumptions.
+4. Compare RCS default LRC `0x21c8` and affected source ancestry before trying the September context fix; capture engine-specific default context files.
+5. Once headless execution succeeds, separate linear/uncompressed BO copy, tiled render, compressed render, and scanout/composition. Compression disable switches in Linux Mesa can be diagnostic controls, but do not fix a Windows guest's proprietary userspace implementation.
+6. For MTL/ARL, audit AUX table save/restore and invalidation and PAT/coherency with actual platform data; do not rename AUX-map platforms as FlatCCS-capable to reuse Xe2 code.
+
+There is no primary evidence in this research establishing one universal “Gen12 Xe Mesa incompatibility,” nor proof that indirect ring state, GPU page-table updates, or FlatCCS is intrinsically required to start an ADL VF. Treat those as separately measurable contracts.
+
+---
+
+## MTL/ARL i915 versus Xe source investigation
+
+Inspected 2026-10-02. This is a source/history study, not hardware validation.
+
+### Source identities and the most useful new evidence
+
+- User fork default `master`: `168f20e718076607aa4e16f9852724548961e751`, March 28 cleanpath with the VF coalescing experiment reverted.
+- User fork `upstream-mtl-cleanpath`: `c3ceb2e9eec13709120f6216229f7ef537177427`, includes later upstream merges.
+- User fork `upstream-mtl-pf-debug-trace`: `cc36279855fcf688f6ada2dc3e79da87e830c5d0`, June 18, newer than default master and contains recorded live experiments.
+- Mainline shared checkout: `ce1e0223d8ad4211275c82a17ed6d43ab81e13d9`.
+
+Do not treat the default branch's March README as the end of the investigation. [The June trace results](https://github.com/peigongdsd/i915-sriov-dkms/blob/cc36279855fcf688f6ada2dc3e79da87e830c5d0/XE_MTL_SRIOV_TRACE_RESULTS_20260618.md) are substantially more informative than commit titles. They document a Windows MTL guest that runs accelerated graphics but retains composition/video glitches. They do not document a wholly nonfunctional Windows VF.
+
+The [April investigation](https://github.com/peigongdsd/i915-sriov-dkms/blob/cc36279855fcf688f6ada2dc3e79da87e830c5d0/MTL_XE_SRIOV_GLITCH_INVESTIGATION.md) describes stable artifacts around taskbar/Explorer menus and two PR #415 repros: Firefox video and WinUI3 ContentIslands. It reports Linux render-node use without the same artifacts. That is useful reporter evidence, not proof that every Linux graphics/video path or every ARL SKU works.
+
+June capture details:
+
+- PF `00:02.0` Xe, VF1 `00:02.1` vfio-pci; 2 GiB VF GGTT.
+- 6,061 GT0 GGTT updates covering 555,062 PTEs; zero recorded service, MMIO or GGTT errors. GT1 had handshakes/runtime queries but no GGTT-update requests.
+- Sampled shadow/live PTE entries 0–31 matched. This sample cannot prove every corrupt surface mapping correct.
+- 507 invalidation requests on each GT, all 1,014 sends signaled. No recorded timeout/reset/page fault/wedge in that repro.
+- Guest GGTT PAT histogram: PAT0 2,048; PAT1 0; PAT2 552,679; PAT3 335.
+- `pat_sw_config` matched the expected software table; this alone does not verify all hardware registers or effective cache policy.
+- Media-GT LNCFCMOCS reads were all zero on two samples. This needs correct register/steering/forcewake interpretation and a working-i915 comparison before calling it faulty programming.
+- Boot warnings came from **host-side Xe VF autoprobe** before vfio binding. Disable VF autoprobe before creating VFs for clean experiments. They are a separate event from runtime Windows corruption.
+- Later Linux harness host freeze occurred during generated EROFS image construction **before QEMU/VFIO attach**. It is not evidence of Xe VF execution failure.
+
+The note's statements about experiments not changing artifact shape are reported history. A commit's presence by itself is not proof it ran, its GuC gates activated, or its results were recorded.
+
+### Phase comparison
+
+Paths/line numbers below refer to fork `168f20e` unless explicitly marked mainline.
+
+| Property | Working i915 design | Xe baseline / current fork | Consequence |
+|---|---|---|---|
+| Platform gate | `i915_pci.c:771–791`, MTL descriptor enables SR-IOV; ARL IDs reuse it at 884 | Mainline `xe_pci.c:384–395` has `require_force_probe` and no `has_sriov` for MTL. Fork `xe_pci.c:327–334` adds it | Flag is necessary, not a complete implementation or Intel support claim |
+| GGTT resource | `intel_iov_provisioning.c:632–639` pushes a shared range to graphics and media GuCs | `xe_gt_sriov_pf_config.c:427–436` already does the same; media full-config encoding takes primary GGTT at 332–343 | Multi-GT GGTT provisioning is already present; do not reimplement it blindly |
+| Per-GT resources | GuC contexts/doorbells/scheduling/thresholds | Xe retains per-GT resource allocation and KLV transport; validation uses primary GGTT at 2455–2482 | Compare **actually pushed incremental KLVs**, not only saved/full blobs |
+| MTL VF GGTT transport | `intel_iov_ggtt.c:173–263`: coalesced MMIO before CT, larger relay packets after CT | Fork `xe_ggtt.c:235–325`: explicit MMIO bootstrap and relay once CT/submission ready; PF service added in `xe_gt_sriov_pf_service.c` | Preserve external VF/PF message compatibility; sender coalescing is an optimization, not required architecture |
+| Physical GGTT writes | `intel_gtt.c:24–29`: binder only if direct stolen access unavailable and media IP13.0. `intel_ggtt.c:1393–1409`: direct GSM when firmware permits; CPU vs binder selected at 2127–2131 | Fork `xe_ggtt.c:117–150`: direct GSM path on host root tile if pcode allows; otherwise BAR. CPU worker applies shadow PTEs | Direct safe CPU path is legitimate. An engine path is a fallback where the hardware workaround needs it, not a mandatory i915 transplant |
+| PF completion | i915 dispatches through its GGTT update backend | Fork `xe_ggtt.c:1697–1719` queues shadow apply and returns count before physical apply; invalidation is deferred again | Explicitly define reply/update/invalidate completion ordering. This remains an engineering invariant even though synchronous experiments did not fix artifacts |
+| GSC/PXP | i915 knows its own SR-IOV firmware lifecycle | Fork `xe_pci_sriov.c:88–119` drains GSC work, takes GSC forcewake, stops GSC and suspends PXP before enabling VFs; resumes on disable | Use Xe firmware lifecycle/ownership, with unwind, rather than copying i915 internals |
+| Runtime values | i915 `intel_iov_service.c:44–62` exposes 17 MTL register values | Fork cleanpath `xe_gt_sriov_pf_service.c:59–70` exposes ten in its 12.70 table; experimental runtime mirror exists | Differences exist, but June service results show no unsupported requests during repro. Compare values/sourcing as a bounded secondary check |
+| GPU page tables | i915 WC page-table mapping for MTL (`intel_gtt.c:106–137`) | Xe already WC maps Xe_LPG+ `XE_BO_FLAG_PAGETABLE` (`xe_bo.c:520–529`) | Porting this i915 WC workaround is redundant. Windows builds its own PPGTTs, outside PF Xe BO policy |
+
+### Corrections to earlier cache hypotheses
+
+#### Declared MTL PAT and MOCS tables already match
+
+i915 PAT indices 0–4 (`intel_gtt.c:505–535`) and Xe's `xelpg_pat_table` (`xe_pat.c:81–87`) encode the same policies: WB/no coherency, WT/no coherency, UC/no coherency, WB/one-way, WB/two-way. Xe internal cache-level mapping is UC→2, WT→1, WB→3 (`xe_pat.c:497–503`).
+
+i915 `mtl_mocs_table` (`intel_mocs.c:382–430`) and Xe `mtl_mocs_desc` (`xe_mocs.c:449–498`) also have the same declared entries. A wholesale table import therefore has no explanatory value. Hardware programming and guest selection can still differ.
+
+The apparent reversed Xe `xelpg_pat_ops` routing (`xe_pat.c:351–358`) deserves awareness, not a root-cause claim: graphics uses plain writes while media uses the MCR helper, opposite the adjacent comment/dump routing and i915. However mainline `xe_gt_mcr_multicast_write()` (`xe_gt_mcr.c:880–894`) itself only takes the MCR lock, performs the same MMIO write, and unlocks; multicast is the default state. During serialized initialization this can produce the same hardware writes. This is present in mainline too, not introduced by the SR-IOV fork.
+
+#### GGTT PAT counts do not identify Windows surface policy
+
+The June note inferred that most GGTT entries use UC because they select PAT2. The histogram proves the selected GGTT PAT index, but it does not prove that the corrupt Windows surface is uncached:
+
+1. A Windows application/composition surface is normally accessed using its process GPU page tables. Those PPGTT mappings are not the PF's GGTT shadow.
+2. MTL MOCS entries 1–15 in these tables use `IG_PAT` (ignore PAT), and include cached modes. Command/surface MOCS selection matters alongside page-table PAT and coherency.
+3. The same physical page may have several GPU/CPU aliases. Mutating one GGTT PAT entry does not establish consistent policy across those aliases.
+
+Thus do not conclude that PAT3 is wrong because it is rare, or that changing those 335 GGTT PTEs to PAT2 should fix Windows. A narrowly scoped cache experiment must identify the corrupt surface and account for its PPGTT/MOCS/CPU aliases. A temporary consistent conservative surface policy can be a diagnostic, not a proposed final fix.
+
+#### Flat CCS is not the obvious MTL mechanism
+
+MTL's descriptor has no `has_flat_ccs`; `xe_device.c:783–804` runtime flat-CCS probing is for graphics >=20. `xe_sriov_vf_ccs.c` migration logic is therefore not a demonstrated active path here. MTL can still have auxiliary-surface compression and synchronization issues; do not confuse those with the modern flat-CCS VF migration mechanism.
+
+#### Host display code is not automatically Windows VF code
+
+Host Xe scanout/domain/flush/PAT changes often do not touch a Windows VF's private surface allocations. Linux Xe VF `vf_update_device_info()` likewise is not the Windows driver's capability source. For Windows compare the PCI/BAR contract, PF/GuC configuration and runtime replies, PF-programmed hardware, and guest allocation/command choices.
+
+### Experiments already represented in history
+
+| Experiment | Commits | Evidence boundary |
+|---|---|---|
+| MTL enable + GSC/PXP | `0bbf46a`, `e74cb07` | Foundational bring-up, retained |
+| MMIO bootstrap then CT relay | `ec0f9b9`, `1dceebf`, `996c7e6`, `0a3545f` | Retained; June live protocol counters show traffic successfully processed |
+| Shadow plus staged apply | `4f7a59b`, `13ce808`, `4cee2b9` | Retained |
+| Direct GSM host access | `b1936f5` | Retained; matches real hardware workaround |
+| i915 VF coalescing | `d713541`; revert `168f20e` | Default cleanpath intentionally removed it; no reason to revive for architectural parity |
+| Synchronous apply | `89bdb7f`, `6e27a95`; reverts `9374be0`, `a229c16`; later `9abcb52` | Reported not to change artifact shape; keep completion audit separate from artifact hypothesis |
+| Engine/bind queue approach | `e28ee35`, `244bdbc`, `d886462`, `a917143`, `6485483`; CPU `0b67ed3` | Existing attempts must be read before repeating them |
+| GuC invalidation | `42502ce`; revert `395bdee` | Cleanpath notes report boot failures; avoid blocking waits on a G2H worker that must also process completion |
+| Runtime mirror / PM | `1a4aa7b`; drop `c89f9e1`; mirror `90befe5` | Exact media forcewake/value sourcing not identical to i915; no late unsupported requests in June |
+| i915 MTL RCS/CCS GuC WA | `0526c5a`, validation `d4005e1` | Adds `GUC_WA_RCS_CCS_SWITCHOUT`, two ADS KLVs for 12.70–12.74, firmware >=70.10.0. Verify running firmware and emitted KLVs before treating as ruled out |
+| Host display/page-table policy tracing | `01d3531`, `a342f77`, `5a03129`, `38100d9`, `57eceee` | Guest surface applicability must be shown |
+| Latest bounded observation | `ce2699a`, `2c46b49`, `cc36279` | Common incremental-KLV hook and per-PAT/history rings solve earlier incomplete capture, but the last change's new boot results are not in the note |
+
+### Intel primary-source messages
+
+1. [Intel LTS runtime-register extension c031d1a](https://github.com/intel/linux-intel-lts/commit/c031d1a2aaea6d9804a6a12af67b424642171836): actually adds `0x10100c` and `0x389140` to the already existing MTL list. It is evidence of a platform-specific runtime contract; its short message does not prove any one missing value causes current corruption.
+2. [Mainline c08c364: bypass MTL BAR stolen access](https://github.com/torvalds/linux/commit/c08c364102d07288610734de34111a666e730ae7): Intel explicitly identifies system hangs from MTL stolen BAR access, firmware-enabled direct DSM/GSM as the host workaround, and excludes guests from that direct physical-memory shortcut. Pcode `0x138914 == 1` is the permission check.
+3. [Intel follow-up: disable the binder](https://www.mail-archive.com/intel-gfx%40lists.freedesktop.org/msg333305.html): once direct GSM works, Intel does not require MI_UPDATE_GTT; the message notes dependency/async/hang risks, retains binder for VMs, and leaves generic engine updates as a possible optimization. This directly supports preserving hardware semantics without copying old binder machinery.
+4. [Intel LTS bcf6f14318c852a7319cf3ebeb0978432e314c0e](https://github.com/intel/linux-intel-lts/commit/bcf6f14318c852a7319cf3ebeb0978432e314c0e), now retrieved and verified through the GitHub API, documents unstable direct MTL **VF** GGTT access and removal of its GGTT BAR access. The VF must request PF updates through MMIO and CTB relay. Its `Wa_22018453856` replaces MTL VF insert-page/insert-entries callbacks with relay operations and defines action `0x102` including duplicate/replicate modes. This establishes a hardware-driven external protocol requirement for Xe compatibility. It does not require reproducing i915's internal buffer/coalescing design.
+
+These Intel commits concern different actors: the MTL **VF** uses relay because its direct access is restricted; the **PF** may apply those requests through firmware-authorized direct GSM. A safe direct PF backend and an obligatory VF-to-PF relay are compatible. Preserve both sides of that contract when simplifying the implementation. The original commit response and patch are saved in `evidence/intel-lts-bcf6f143.json`.
+
+### Recommended Xe-native architecture and next experiments
+
+1. Finish ADL-P separately; do not put MTL binder/dual-GT/GSC work into that platform's fixes. ADL-P provides a simpler test of the shared VF/PF ABI.
+2. Rebase the minimum MTL bring-up on current Xe, retaining gated SR-IOV enablement, correct power/firmware lifecycle, public MMIO/relay protocol support, and safe GGTT writes. Reuse Xe's existing provisioning, locks, workqueues and invalidation infrastructure. Modern mainline already models shared tile GGTT plus per-GT GuC state.
+3. Direct GSM is the simplest PF backend **when the documented firmware permission is present**. On machines without it, use an engine-assisted backend only after implementing proper bootstrap and completion guarantees. Mainline `xe_migrate_update_pgtables()` (`xe_migrate.c:2051–2081`) offers native scheduling/dma-fence concepts for **PPGTT**; it is not a drop-in safe GGTT update operation. Validate the addressing/MI opcode/invalidation requirements instead of mechanically calling it.
+4. Do not acknowledge a semantically complete VF update before physical writes and required invalidation are complete unless ABI ordering explicitly allows it. An asynchronous implementation should attach an actual completion fence and defer the response off the G2H completion worker. Test early MMIO without CT, steady CT, timeout, overlapping updates, and FLR teardown. This is correctness work, not a claim to cure the recorded artifact.
+5. Use the June bounded traces, with one exact Windows driver/repro and working i915 PF as control. Capture **all** incremental KLVs on both GTs, GuC version/ADS workaround payload, runtime values, PAT hardware readback, MOCS hardware state and relevant workaround registers. Avoid trace-induced performance perturbation.
+6. Reproduce rendering-to-copy-to-video-to-composition sharing with a minimal Windows sample. Capture output before presentation to distinguish GPU producer corruption from display/capture/compositor transfer. Correlate one failing allocation with its guest GPUVA, PPGTT PAT, actual surface/command MOCS, auxiliary metadata and synchronization operations. This is substantially more discriminating than another global GGTT change.
+7. Use the host driver's actual PF policy delta to design one-at-a-time experiments. Declared PAT/MOCS table equality and existing Xe WC page-table mapping mean those are not missing features to import.
+8. ARL: record actual PCI ID, GMD graphics/media versions and firmware. Current shared descriptor does not imply every ARL SKU/firmware pairing identical to MTL. Gate workarounds by affected IP/stepping, then validate ARL after MTL, not by a marketing-name substitution.
+
+### Windows-driver reverse engineering
+
+The source differences above stand independently of binary analysis. The newly authorized Windows investigation now has a concrete separate target: the nested-Hyper-V environment classifier. Both official packages have been extracted and their isolated classifier behavior is reported near the beginning of this report. That finding must not be retroactively presented as a diagnosis of MTL composition defects. For the latter, match the failing guest's exact package/module, identify the surface or synchronization transition, and decode GuC/MMIO messages against the open ABI before attributing an opaque private-driver policy. INF matching and package age alone do not establish the runtime path.
+
+No driver code was changed, built, loaded or tested on hardware during this source study.
+
+---
+
+## Nested Hyper-V, Windows VF startup, and the CPUID contract
+
+Verified against primary sources on 2026-10-02. This chapter records published runtime observations and protocol definitions. The independent classifier emulation near the beginning of this report adds version-specific binary evidence; neither study constitutes a local Windows/GPU runtime reproduction.
+
+### Intel acknowledges a guest-driver classification defect
+
+Intel's [KB 000102878](https://www.intel.com/content/www/us/en/support/articles/000102878/graphics.html) explicitly attributes a VFIO SR-IOV Code 43 failure to treating nested Hyper-V as a native Hyper-V host. Its published resolution still says Intel is investigating; the page identifies driver 32.0.101.8531 and Core Ultra 7 265H. This is not simply a conjecture that nested EPT or IOMMU is broken.
+
+[#1394](https://github.com/IGCIT/Intel-GPU-Community-Issue-Tracker-IGCIT/issues/1394) was closed June 30 when Intel redirected updates to that article, not when a fixed driver was announced. The retrieved API reports `state_reason=completed`, which is misleading if interpreted as evidence of remediation. A July 27 independent lab report identifies `igdkmdn64.sys` 32.0.101.8826, SHA-256 `AECB6FDEB393BA9F92945FF1507D5FB41996E0EB7EE0A575D5AE8E8C14B87B80`, and ARL VF device 7D67. It reports an earlier skipped state transition, leaving a later StartDevice guard to return `0xC000000D`, with DxgKrnl Event 549 and Code 43. The report claims that correcting the earlier transition enabled startup on Windows 11 and Server 2025. Those experiments are the reporter's evidence, not independently repeated here. Intel tracking number: `14027918034`.
+
+The separate B50 [#1468](https://github.com/IGCIT/Intel-GPU-Community-Issue-Tracker-IGCIT/issues/1468) concerns startup regressions reported without nested virtualization. Therefore Code 43 alone cannot identify the nested defect or justify applying its proposed correction to all startup failures.
+
+### Exactly which Hyper-V bits mean what
+
+Microsoft's [feature discovery specification](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/feature-discovery) and [partition privilege mask](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/datatypes/hv_partition_privilege_mask) define:
+
+| CPUID field | Meaning relevant to this investigation |
+|---|---|
+| `1:ECX[31]` | Hypervisor present |
+| `0x40000000` | Maximum supported hypervisor leaf and diagnostic vendor string |
+| `0x40000001:EAX == 0x31237648` | `Hv#1` interface semantics |
+| `0x40000003:EBX[0]` | `CreatePartitions` privilege |
+| `0x40000003:EBX[12]` | `CpuManagement` privilege |
+| `0x40000004:EAX[12]` | Hypervisor is nested within a Hyper-V partition |
+| `0x40000006:EAX[13:10]` | Current guest hypervisor nesting level; zero when non-nested |
+
+Microsoft recommends using the interface signature for compatibility, rather than the vendor string. A privilege saying this Windows partition controls its immediate hypervisor's CPUs does not establish that its PCI device is a physical function. The nested indicator provides additional topology information; it must be read only after validating the available leaves and interface.
+
+### Why hypervisor flags are not interchangeable
+
+[QEMU's own Hyper-V documentation](https://www.qemu.org/docs/master/system/i386/hyperv.html) says enabling Hyper-V enlightenments changes the exposed identification to Hyper-V while moving KVM identification to leaves `0x40000100..0x40000101`. Consequently, `Microsoft Hv` is not evidence that Windows' own hypervisor has started. `hv-vendor-id` changes only the identification string, and setting it alone does not enable Hyper-V features. `hv-evmcs` is a performance/virtualization interface between KVM and nested Hyper-V; it is not a VF startup correction.
+
+This investigation must distinguish:
+
+1. L0 KVM permits nesting (`kvm_intel.nested=Y`). This is a host capability.
+2. The guest CPU exposes VMX. This allows a guest hypervisor to start but does not prove it started.
+3. Windows launches Hyper-V, including when VBS/Memory Integrity or Virtual Machine Platform causes that launch. Its graphics driver runs in the root partition of that immediate hypervisor while its GPU can remain an outer-assigned VF.
+4. A further L2 guest actually runs. The reported graphics defect arises at Windows VF startup; no L2 GPU assignment is required to reproduce it.
+5. A virtual IOMMU is exposed and the VF is passed onward into L2. That is a separate device-assignment topology with separate translation requirements.
+
+### Proposed diagnostic matrix
+
+Hold PF driver build, GuC firmware, VF count/resources, guest driver hash, VM machine type, PCI topology/BAR layout, and RAM fixed. Use an isolated guest snapshot. Record actual guest CPUID output and Windows hypervisor/VBS state after each cold start.
+
+| Trial | VMX exposed | Windows Hyper-V/VBS actually running | L2 workload | Purpose |
+|---|---|---|---|---|
+| A | No | No | No | Establish ordinary VF startup baseline |
+| B | Yes | No | No | Test VMX exposure separately from guest Hyper-V execution |
+| C | Yes | Yes | No | Isolate immediate root-partition classification |
+| D | Yes | Yes | Yes, CPU-only | Test nested activity after successful C |
+| E | Yes | Yes | GPU assigned to L2 | Separate future vIOMMU/device reassignment test |
+
+For each trial capture CPUID leaves 1, `0x40000000` through `0x40000006`, and outer KVM leaf range if present; PnP problem code; exact DxgKrnl status; PF GuC/VF lifecycle messages; whether PF/VF communication begins before failure. A result where A/B work, C fails with `STATUS_INVALID_PARAMETER`, and GPU communication does not newly fail strongly prioritizes the Windows branch over Xe memory-management changes. A/B failure demands ordinary VF initialization debugging first.
+
+### What a correction should preserve
+
+The most focused candidate is in the Windows driver's **earlier environment classification/state-resolution logic**, accounting for a passed-through VF in a nested root partition. Preserve the later validity checks and error paths. This is the direction supported by the public lab report and Intel's issue description. The report's emulation identifies the environment fields in 7092 and 9033, and conditionally reproduces a 9033 resource rejection. The actual guest resource layout and equivalence to the older reported startup guard remain to be established.
+
+Do not treat hiding VMX, turning off guest Hyper-V, removing VBS, or globally falsifying root-partition privileges as the product fix. Those can be controlled discriminators, but they change guest capabilities. A top-level QEMU vendor string also may not describe the CPUID interface ultimately returned by an active L1 Hyper-V to its own Windows root partition; confirm what the driver actually observes.
+
+The cross-layer implication is useful for the original Xe study: an identical nested-only failure on a known-good i915 PF and an experimental Xe PF can be explained by a shared Windows guest-driver defect. It would not prove both PF implementations have the same missing hardware workaround. Conversely, fixing this Windows branch does not establish MTL/ARL Xe PF correctness for rendering, composition, reset, or multi-VF isolation.

@@ -1,0 +1,279 @@
+{
+  "image_sha256": "454624942bf9a79a75fd1bfe6c6a2f8d499aabef45cb4268a1353d527902d098",
+  "routine_rva": "0xb3a0",
+  "scope": "Execute the unmodified 7092 CPUID classifier in an isolated CPU emulator.\n\nThis is not Windows, a GPU simulation, or a full driver startup test. Only the\nidentified routine runs. String/memory library calls, logging and stack-cookie\nchecking are substituted; CPUID responses and the CPU-brand input are supplied.\n",
+  "cases": [
+    {
+      "case": "bare-metal",
+      "state_f28": 3,
+      "vendor_f2c": 0,
+      "nested_bit_available": false,
+      "cpuid_calls": [
+        {
+          "leaf": "0x1",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        }
+      ],
+      "stub_rvas": [
+        "0x24ed10",
+        "0x496500"
+      ]
+    },
+    {
+      "case": "KVM",
+      "state_f28": 0,
+      "vendor_f2c": 5,
+      "nested_bit_available": false,
+      "cpuid_calls": [
+        {
+          "leaf": "0x1",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x80000000",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x4000000a",
+            "0x4b4d564b",
+            "0x564b4d56",
+            "0x4d"
+          ]
+        },
+        {
+          "leaf": "0x80000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x80000004",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        }
+      ],
+      "stub_rvas": [
+        "0x24ed10",
+        "0x354828",
+        "0x35482e",
+        "0x496500"
+      ]
+    },
+    {
+      "case": "VMware",
+      "state_f28": 0,
+      "vendor_f2c": 2,
+      "nested_bit_available": false,
+      "cpuid_calls": [
+        {
+          "leaf": "0x1",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x80000000",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x4000000a",
+            "0x61774d56",
+            "0x4d566572",
+            "0x65726177"
+          ]
+        },
+        {
+          "leaf": "0x80000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x80000004",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        }
+      ],
+      "stub_rvas": [
+        "0x24ed10",
+        "0x354828",
+        "0x35482e",
+        "0x496500"
+      ]
+    },
+    {
+      "case": "Hyper-V child",
+      "state_f28": 0,
+      "vendor_f2c": 3,
+      "nested_bit_available": false,
+      "cpuid_calls": [
+        {
+          "leaf": "0x1",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x80000000",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x4000000a",
+            "0x7263694d",
+            "0x666f736f",
+            "0x76482074"
+          ]
+        },
+        {
+          "leaf": "0x80000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x80000004",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000003",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        }
+      ],
+      "stub_rvas": [
+        "0x24ed10",
+        "0x354828",
+        "0x35482e",
+        "0x496500"
+      ]
+    },
+    {
+      "case": "Hyper-V root",
+      "state_f28": 3,
+      "vendor_f2c": 3,
+      "nested_bit_available": false,
+      "cpuid_calls": [
+        {
+          "leaf": "0x1",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x80000000",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x4000000a",
+            "0x7263694d",
+            "0x666f736f",
+            "0x76482074"
+          ]
+        },
+        {
+          "leaf": "0x80000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x80000004",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000003",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x1001",
+            "0x0",
+            "0x0"
+          ]
+        }
+      ],
+      "stub_rvas": [
+        "0x24ed10",
+        "0x354828",
+        "0x35482e",
+        "0x496500"
+      ]
+    },
+    {
+      "case": "Nested Hyper-V root",
+      "state_f28": 3,
+      "vendor_f2c": 3,
+      "nested_bit_available": true,
+      "cpuid_calls": [
+        {
+          "leaf": "0x1",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x0",
+            "0x80000000",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x4000000a",
+            "0x7263694d",
+            "0x666f736f",
+            "0x76482074"
+          ]
+        },
+        {
+          "leaf": "0x80000000",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x80000004",
+            "0x0",
+            "0x0",
+            "0x0"
+          ]
+        },
+        {
+          "leaf": "0x40000003",
+          "subleaf": "0x0",
+          "outputs": [
+            "0x0",
+            "0x1001",
+            "0x0",
+            "0x0"
+          ]
+        }
+      ],
+      "stub_rvas": [
+        "0x24ed10",
+        "0x354828",
+        "0x35482e",
+        "0x496500"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+refs/remotes/origin/drm-xe-fixes 72207463f7a4a6818a88f4ef57802b42da534301
+refs/remotes/origin/drm-xe-next cf4171a20d13918e07ed01a1e01a6b546825c601
+refs/remotes/origin/drm-xe-next-cleanup-acee8242cb56 fbf668285bea77f5cb6e86bcd39898d567141a8d
+refs/remotes/origin/drm-xe-next-fixes cee9395acd8043be0644b25c34bfa86623f2b935
+refs/remotes/origin/drm-xe-next-rebase-6.4-v1 ff868a88c1550fea02a8a599678e8bf9bd9adc2d
+refs/remotes/origin/drm-xe-next-rebase-6.4-v2 c533b7468c3bfc7f359e1d2f3856c1602a93f096
+refs/remotes/origin/drm-xe-next-rebase-6.4-v3 cb8c359d816115a3fe2bbd1c22f26c277e6ddcc2
+refs/remotes/origin/main cff2f6d5aab98670ad1c9d1442373e4abf266366
+refs/remotes/origin/mem_size_v4 a26b4cdad1a76336a0152f1d6ffb27f9e8b21fb8
+refs/remotes/origin/topic/xe-for-CI b275cb3f07a7ab3ef3bd419db86bd42fa95dcedb
+refs/remotes/origin/xe 6307e03f2c266127fe6732c651220c817220d148
+refs/remotes/origin/xe-rebase-move-display-pass1 a01b2fb2969928f026eefb36e31794796c2a17c4
+refs/remotes/origin/xe-rebase-move-display-pass2 169121b9f1a0e938728698accd4900c803c727b1
+refs/remotes/origin/xe-rev1 c978587698c534c78a6b9eca1e6d358f9831fa17
+refs/remotes/origin/xe-rev2-cr a7d7a23be9556ad6006af6a5cfb6d321e2b7c707
+refs/remotes/origin/xe-rev3-cr 8ab5e0e7fd4db0404cb51bb95549999035a812a8

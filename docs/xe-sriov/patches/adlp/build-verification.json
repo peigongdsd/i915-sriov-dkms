@@ -1,0 +1,27 @@
+{
+  "verified_at": "2026-10-02T11:51:51.601828+00:00",
+  "source_base": "f4cb98f4c28e1f3ac78ca88501a87c86d0c21a88",
+  "source_commit": "32d16259df98d7153daaa9b8c461c2eaa0d24394",
+  "upstream_patch": "38631a7bce195b88814b93bf2b6d3e48c827fef2",
+  "kernel_headers": "7.2.8",
+  "compiler": "GCC 16.2.0",
+  "make_exit_status": 0,
+  "targets": {
+    "drivers/gpu/drm/xe/xe.ko": {
+      "bytes": 174767760,
+      "sha256": "54eb5826fb97fdeb5ca737fb5e8db4bc0a45c12cc20ecc2333e8007e55641ad6",
+      "vermagic": "7.2.8 SMP preempt mod_unload"
+    },
+    "compat/intel_sriov_compat.ko": {
+      "bytes": 1594968,
+      "sha256": "282567b100d062e03eed910efb21f7d8b64c8eb43e8eee7b96042854b2de8654",
+      "vermagic": "7.2.8 SMP preempt mod_unload"
+    }
+  },
+  "modpost_completed": true,
+  "btf_generated": false,
+  "btf_note": "Headers-only environment has no vmlinux; BTF generation skipped. pahole unavailable (version 0 versus kernel build 132).",
+  "hardware_tested": false,
+  "modules_loaded": false,
+  "log_sha256": "4a80399b9d80b7f3066cacca80e0f0faa0b9428163b92047e752be9bedf37df6"
+}

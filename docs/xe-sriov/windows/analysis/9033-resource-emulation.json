@@ -1,0 +1,156 @@
+{
+  "binary": "windows/extracted/9033/Graphics/igdkmdn64.sys",
+  "sha256": "2969ef18daf397b43353dd4ff465f52a8107fc1a612eab4a8cc2703dee919a4d",
+  "parser_rva": "0x25080",
+  "method": "original resource-parser bytes; synthetic resource descriptors; logging and PCI config reads stubbed; not actual guest trace",
+  "results": [
+    {
+      "platform_internal": "0x4f8",
+      "state_e98": 0,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 1,
+      "status": "0x0",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x1",
+      "visited": [
+        "0x259bb",
+        "0x259c4"
+      ],
+      "stubbed_calls": [
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f8",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 1,
+      "status": "0xc000000d",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x1",
+      "visited": [
+        "0x259bb"
+      ],
+      "stubbed_calls": [
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f8",
+      "state_e98": 0,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 2,
+      "status": "0x0",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x3",
+      "visited": [
+        "0x2578d",
+        "0x259bb",
+        "0x259c4",
+        "0x25a23"
+      ],
+      "stubbed_calls": [
+        "0x35ca30",
+        "0x58d9b0",
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f8",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 2,
+      "status": "0x0",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x3",
+      "visited": [
+        "0x2578d",
+        "0x259bb",
+        "0x25a23"
+      ],
+      "stubbed_calls": [
+        "0x35ca30",
+        "0x58d9b0",
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f9",
+      "state_e98": 0,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 1,
+      "status": "0x0",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x1",
+      "visited": [
+        "0x259bb",
+        "0x259c4"
+      ],
+      "stubbed_calls": [
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f9",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 1,
+      "status": "0xc000000d",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x1",
+      "visited": [
+        "0x259bb"
+      ],
+      "stubbed_calls": [
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f9",
+      "state_e98": 0,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 2,
+      "status": "0x0",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x3",
+      "visited": [
+        "0x2578d",
+        "0x259bb",
+        "0x259c4",
+        "0x25a23"
+      ],
+      "stubbed_calls": [
+        "0x35ca30",
+        "0x58d9b0",
+        "0x35ca30"
+      ]
+    },
+    {
+      "platform_internal": "0x4f9",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "vf_mode_45660": 2,
+      "resource_count": 2,
+      "status": "0x0",
+      "flags_c98": "0x30000000",
+      "flags_c9c": "0x3",
+      "visited": [
+        "0x2578d",
+        "0x259bb",
+        "0x25a23"
+      ],
+      "stubbed_calls": [
+        "0x35ca30",
+        "0x58d9b0",
+        "0x35ca30"
+      ]
+    }
+  ]
+}

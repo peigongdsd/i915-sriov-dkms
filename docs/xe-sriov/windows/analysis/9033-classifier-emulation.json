@@ -1,0 +1,87 @@
+{
+  "binary": "windows/extracted/9033/Graphics/igdkmdn64.sys",
+  "sha256": "2969ef18daf397b43353dd4ff465f52a8107fc1a612eab4a8cc2703dee919a4d",
+  "classifier_rva": "0xb680",
+  "method": "original code in isolated Unicorn; helper calls stubbed; not a Windows/GPU execution",
+  "results": [
+    {
+      "vendor": "",
+      "management": false,
+      "nested": false,
+      "brand": "INTEL CORE",
+      "state_e98": 2,
+      "vendor_e9c": 0,
+      "cpuid_leaves": [
+        "0x1"
+      ]
+    },
+    {
+      "vendor": "KVMKVMKVM",
+      "management": false,
+      "nested": false,
+      "brand": "INTEL CORE",
+      "state_e98": 0,
+      "vendor_e9c": 5,
+      "cpuid_leaves": [
+        "0x1",
+        "0x40000000",
+        "0x80000000"
+      ]
+    },
+    {
+      "vendor": "Microsoft Hv",
+      "management": false,
+      "nested": false,
+      "brand": "INTEL CORE",
+      "state_e98": 0,
+      "vendor_e9c": 3,
+      "cpuid_leaves": [
+        "0x1",
+        "0x40000000",
+        "0x80000000",
+        "0x40000003"
+      ]
+    },
+    {
+      "vendor": "Microsoft Hv",
+      "management": true,
+      "nested": false,
+      "brand": "INTEL CORE",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "cpuid_leaves": [
+        "0x1",
+        "0x40000000",
+        "0x80000000",
+        "0x40000003"
+      ]
+    },
+    {
+      "vendor": "Microsoft Hv",
+      "management": true,
+      "nested": true,
+      "brand": "INTEL CORE",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "cpuid_leaves": [
+        "0x1",
+        "0x40000000",
+        "0x80000000",
+        "0x40000003"
+      ]
+    },
+    {
+      "vendor": "Microsoft Hv",
+      "management": true,
+      "nested": true,
+      "brand": "AMD RYZEN",
+      "state_e98": 2,
+      "vendor_e9c": 3,
+      "cpuid_leaves": [
+        "0x1",
+        "0x40000000",
+        "0x80000000"
+      ]
+    }
+  ]
+}
