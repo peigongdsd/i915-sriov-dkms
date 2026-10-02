@@ -50,7 +50,7 @@ capture module-file.txt 10 modinfo xe
 capture pci.txt 10 lspci -Dnnk -s "$bdf"
 capture kernel-journal.txt 30 journalctl -k -b -o short-monotonic --no-pager
 capture kernel-dmesg.txt 10 dmesg
-for item in version srcversion taint parameters/force_probe parameters/max_vfs parameters/guc_log_level; do
+for item in version srcversion taint parameters/force_probe parameters/max_vfs parameters/guc_log_level parameters/xelp_enable_ccs; do
     read_file "module-${item//\//_}.txt" "/sys/module/xe/$item"
 done
 pci=/sys/bus/pci/devices/$bdf
@@ -79,7 +79,7 @@ if [[ -n $debug ]]; then
     printf 'debugfs=%s\n' "$debug" >> "$status"
     files=(name info sriov_info tile0/ggtt)
     gt=tile0/gt0
-    for item in topology workarounds register-save-restore default_lrc_rcs default_lrc_bcs default_lrc_vcs default_lrc_vecs uc/guc_info uc/guc_ctb; do
+    for item in topology workarounds register-save-restore default_lrc_rcs default_lrc_ccs default_lrc_bcs default_lrc_vcs default_lrc_vecs uc/guc_info uc/guc_ctb; do
         files+=("$gt/$item")
     done
     if [[ $role == host && ! -e $pci/physfn && -e $pci/sriov_totalvfs ]]; then

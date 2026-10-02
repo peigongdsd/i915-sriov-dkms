@@ -23,7 +23,7 @@ Replace the examples with the actual host PF and guest VF BDFs. Use a fresh outp
 | Xe | Windows Intel driver | Linux PF contexts only. The Windows driver builds guest VF contexts; it does not execute Linux `xe_lrc.c`. A Linux guest fix does not prove a Windows guest fix. |
 | i915-sriov-dkms | Its known-working guest driver | Existing working control. Preserve its precise driver/firmware versions; this is a separate implementation. |
 
-Start with one VF, default provisioning, no migration, and otherwise identical host/guest configuration. Do not introduce experimental XeLP CCS0 enablement into this first Linux test: the upstream ADL-P engine descriptor does not expose CCS0. Its absence is not a failed test. Once the matching Xe PF/Linux VF pair succeeds, test the unchanged Windows driver separately if Windows is part of the requirement.
+Start with one VF, default provisioning, no migration, and otherwise identical host/guest configuration. For the first **Linux VF** comparison, preserve upstream's CCS-disabled baseline: the upstream ADL-P engine descriptor does not expose CCS0. Its absence is not a failed Linux test. **Windows is a separate compatibility test:** current DKMS recommends `xe.xelp_enable_ccs=1` for affected Windows guests on Xe_LP. That existing option enables CCS0 and its register programming; `i915.xelp_enable_ccs=1` cannot enable it in Xe. Confirm `/sys/module/xe/parameters/xelp_enable_ccs` reports `Y`, and retain the boot's CCS-enable message. See the [Windows Code 43 follow-up](../../adlp-windows-code43-triage.md) for the supplied log and the first targeted retest. Do not require Linux VF success before trying this Windows-specific configuration correction.
 
 ## Build and identity record
 
@@ -58,7 +58,7 @@ Identify the right DRM debugfs root by its `name` file and the PCI BDF. Do not a
 |---|---|---|
 | PF and Linux VF | `D/info`, `D/sriov_info` | Device capabilities and PF/VF mode. |
 | PF and Linux VF | `D/tile0/ggtt`, `D/tile0/gt0/topology`, `D/tile0/gt0/workarounds`, `D/tile0/gt0/register-save-restore` | GGTT allocator state, virtualized topology and programmed workaround lists. The GGTT allocator dump alone is not a raw-PTE/DMA-address proof. |
-| PF and Linux VF | `D/tile0/gt0/default_lrc_rcs`, `default_lrc_bcs`, `default_lrc_vcs`, `default_lrc_vecs` | Saved default context image per engine class, after successful capture. An absent engine can print `No default LRC for class ...`. |
+| PF and Linux VF | `D/tile0/gt0/default_lrc_rcs`, `default_lrc_ccs`, `default_lrc_bcs`, `default_lrc_vcs`, `default_lrc_vecs` | Saved default context image per engine class, after successful capture. An absent engine can print `No default LRC for class ...`. |
 | PF and Linux VF | `D/tile0/gt0/uc/guc_info`, `D/tile0/gt0/uc/guc_ctb` | GuC/interface state and CTB state. |
 | PF only | `D/tile0/gt0/hw_engines`, `D/tile0/gt0/uc/guc_log` | Physical engine state and GuC firmware log. These files are deliberately not exposed by Xe VF. |
 | PF only | `D/sriov/pf/vfs`, `D/sriov/pf/versions` | VF summary and PF service versions. |

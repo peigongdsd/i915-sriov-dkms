@@ -1,0 +1,11 @@
+--- a/hardware-configuration.nix
++++ b/hardware-configuration.nix
+@@ -144,6 +144,6 @@
+     #"zswap.max_pool_percent=20"
+     #"zswap.shrinker_enabled=1"
+-    # Restore Xe_LP CCS0 for Windows SR-IOV guests (i915-sriov 2026.09.16+).
+-    "i915.xelp_enable_ccs=1"
++    # Restore Xe_LP CCS0 for Windows SR-IOV guests using the Xe PF driver.
++    "xe.xelp_enable_ccs=1"
+     "intel_iommu=on"
+     "iommu=pt"
