@@ -1,22 +1,28 @@
 # ADL-P Xe SR-IOV work
 
-The first implementation target is Linux Xe on ADL-P. This branch starts from current DKMS upstream and adds one accepted Xe correction. MTL/ARL work is paused while the supplied ADL-P Windows Code 43 failure is investigated.
+The first implementation target is Linux Xe on ADL-P. This experimental branch starts from the accepted timestamp correction, adds first-CAT diagnostics, and tests explicit initialization of the ADL-P render indirect-context offset. MTL/ARL work remains paused.
 
-**Windows follow-up:** the user reports that correcting `i915.xelp_enable_ccs=1` to the Xe option still leaves Code 43. Preserve a fresh host capture before further changes; the collector includes effective CCS state, complete kernel logs and any matching devcoredump. Read the [case analysis and result](adlp-windows-code43-triage.md). MTL remains paused.
+**Current evidence:** all three reuploaded captures have CCS enabled and match the previous module's source version. They show host PF DMA/CAT failures and a zero indirect-context offset in the pre-crash default render context. Windows remains Code 43. Read the [capture analysis](adlp-reuploaded-capture-analysis.md) and [experimental branch test guide](adlp-indirect-offset-experiment.md). The new experiment is build-validated but has no hardware result yet.
 
 | Branch / change | Identity |
 |---|---|
 | Clean upstream snapshot: `codex/upstream-sync-2026-10-02` | strongtz master `f4cb98f4c28e1f3ac78ca88501a87c86d0c21a88` |
 | ADL-P work: `codex/xe-adlp-2026-10-02` | The snapshot plus the correction and these research records |
 | Driver correction | `32d16259df98d7153daaa9b8c461c2eaa0d24394`, unmodified backport of upstream `38631a7bce195b88814b93bf2b6d3e48c827fef2` |
+| First-CAT diagnostics | `22a6e50e08f48048fff4d3ddceeaf0b4401ddaa3` |
+| ADL-P render offset experiment | `ef7ad6b9a803f84153161aa8dc6c3ef8dbe50c83` on `codex/xe-adlp-indirect-offset-2026-10-02` |
 
 The patch fixes duplicate emission of XeLP timestamp workaround `Wa_16010904313`. Render/compute engines retain it in the indirect context; copy/video engines retain it in the post-restore batch. Both Linux PF and Linux VF context construction use this code. A Windows VF constructs its own contexts, so a host-only change has different coverage.
 
-**Validation:** the full Xe module and compatibility module build and link successfully against Linux 7.2.8 headers with GCC 16.2.0. MODPOST completed. The headers-only environment lacked `vmlinux`, so BTF generation was skipped. The modules were not loaded and hardware resolution of the reported failed vGPU is not yet established.
+**Validation:** the original full build and both new incremental source builds with complete module relinking passed against Linux 7.2.8 headers, including MODPOST. The headers-only environment lacked `vmlinux`, so BTF generation was skipped. The assistant did not load the modules. User captures match the original build's source version and still fail; the offset experiment has not been tested on hardware.
 
 - [ADL-P hardware test plan](patches/adlp/TESTING.md)
 - [Build record](patches/adlp/build-verification.json) and [complete build log](patches/adlp/build-7.2.8.log)
 - [Independent patch review](adlp-timestamp-review.md)
+- [Current capture analysis](adlp-reuploaded-capture-analysis.md)
+- [ADL-P context experiment and test guide](adlp-indirect-offset-experiment.md)
+- [PF/VF runtime-service differences](adlp-runtime-contract-audit.md)
+- [KVMFR and Xe import audit](adlp-kvmfr-dmabuf-notes.md)
 - [Detailed research report](RESEARCH-REPORT.md)
 - [Windows analysis and reproducibility](windows/README.md)
 

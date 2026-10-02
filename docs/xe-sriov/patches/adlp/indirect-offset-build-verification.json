@@ -1,0 +1,34 @@
+{
+  "verified_at": "2026-10-02T13:13:15.570506+00:00",
+  "source_commit": "ef7ad6b9a803f84153161aa8dc6c3ef8dbe50c83",
+  "diagnostic_commit": "22a6e50e08f48048fff4d3ddceeaf0b4401ddaa3",
+  "kernel_headers": "7.2.8",
+  "make_exit_status": 0,
+  "modpost_completed": true,
+  "hardware_tested": false,
+  "modules_loaded": false,
+  "build_kind": "incremental compile and full module relink",
+  "targets": {
+    "drivers/gpu/drm/xe/xe.ko": {
+      "bytes": 174776696,
+      "sha256": "760d1ba520e2ab866bf686b3dce3890b8bdfca343e4128876b281d5a49b12fc3",
+      "srcversion": "786184C2F6AEDD74A6B2FDB",
+      "vermagic": "7.2.8 SMP preempt mod_unload"
+    },
+    "compat/intel_sriov_compat.ko": {
+      "bytes": 1594968,
+      "sha256": "282567b100d062e03eed910efb21f7d8b64c8eb43e8eee7b96042854b2de8654",
+      "srcversion": "FD7CCB1E76B5B64810A4548",
+      "vermagic": "7.2.8 SMP preempt mod_unload"
+    }
+  },
+  "log_sha256": "6f4ce2a98c0f95f78f9d5f5b639c339e581def9f07d81b8c81b0eb7ba47a63d4",
+  "btf_note": "Not generated: vmlinux unavailable in headers-only environment; pahole version warning.",
+  "independent_static_review": "No actionable findings: platform/engine gate, encoding, lifetime, locking, format types; saved owner is DRM-file owner.",
+  "patch_style_check": {
+    "errors": 0,
+    "warnings": 0,
+    "scope": "combined code diff",
+    "limits": "checkpatch spelling and const-structure auxiliary dictionaries were unavailable"
+  }
+}

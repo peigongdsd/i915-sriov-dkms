@@ -1,0 +1,17 @@
+warning: Nix search path entry '/nix/var/nix/profiles/per-user/root/channels' does not exist, ignoring
+make: Entering directory '/nix/store/4wn9bw42ij0xsjim7mrn12c0xylv81af-linux-7.2.8-dev/lib/modules/7.2.8/build'
+make[1]: Entering directory '/home/krusl/ChatGPT/SoftwareDevelop/xe-sriov-study/sources/adlp-dkms'
+warning: pahole version differs from the one used to build the kernel
+  The kernel was built with: 132
+  You are using:             0
+make[4]: 'compat/intel_sriov_compat.mod' is up to date.
+  CC [M]  drivers/gpu/drm/xe/xe_lrc.o
+make[4]: 'drivers/gpu/drm/xe/xe.mod' is up to date.
+  LD [M]  drivers/gpu/drm/xe/xe.o
+  MODPOST Module.symvers
+  CC [M]  drivers/gpu/drm/xe/xe.mod.o
+  LD [M]  drivers/gpu/drm/xe/xe.ko
+  BTF [M] drivers/gpu/drm/xe/xe.ko
+Skipping BTF generation for drivers/gpu/drm/xe/xe.ko due to unavailability of vmlinux
+make[1]: Leaving directory '/home/krusl/ChatGPT/SoftwareDevelop/xe-sriov-study/sources/adlp-dkms'
+make: Leaving directory '/nix/store/4wn9bw42ij0xsjim7mrn12c0xylv81af-linux-7.2.8-dev/lib/modules/7.2.8/build'

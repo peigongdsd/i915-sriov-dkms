@@ -1,0 +1,33 @@
+{
+  "verified_at": "2026-10-02T13:12:06.189110+00:00",
+  "source_commit": "22a6e50e08f48048fff4d3ddceeaf0b4401ddaa3",
+  "kernel_headers": "7.2.8",
+  "make_exit_status": 0,
+  "modpost_completed": true,
+  "hardware_tested": false,
+  "modules_loaded": false,
+  "build_kind": "incremental compile and full module relink",
+  "targets": {
+    "drivers/gpu/drm/xe/xe.ko": {
+      "bytes": 174776064,
+      "sha256": "b7d814fe31f866c96ff68a6af01718fca1dc36b70fbc65b63298093da053da76",
+      "srcversion": "A7F071ECFA1550AA20DF3BA",
+      "vermagic": "7.2.8 SMP preempt mod_unload"
+    },
+    "compat/intel_sriov_compat.ko": {
+      "bytes": 1594968,
+      "sha256": "282567b100d062e03eed910efb21f7d8b64c8eb43e8eee7b96042854b2de8654",
+      "srcversion": "FD7CCB1E76B5B64810A4548",
+      "vermagic": "7.2.8 SMP preempt mod_unload"
+    }
+  },
+  "log_sha256": "516239ac98b9f4ee5b4e872fdd33ae113c7c33f74ae8c51f2bc0f87371837584",
+  "btf_note": "Not generated: vmlinux unavailable in headers-only environment; pahole version warning.",
+  "independent_static_review": "No actionable findings: platform/engine gate, encoding, lifetime, locking, format types; saved owner is DRM-file owner.",
+  "patch_style_check": {
+    "errors": 0,
+    "warnings": 0,
+    "scope": "combined code diff",
+    "limits": "checkpatch spelling and const-structure auxiliary dictionaries were unavailable"
+  }
+}

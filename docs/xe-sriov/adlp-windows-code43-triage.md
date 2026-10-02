@@ -2,7 +2,7 @@
 
 2026-10-02. MTL work is paused at the user's request. This note analyzes the supplied 82-line host log; the assistant has not reproduced this machine's failure. The exact running driver commit, Windows driver version, Windows hypervisor state and complete host log were not supplied with that excerpt.
 
-**Latest user result:** enabling the correct Xe CCS option still leaves Windows with Code 43. The configuration correction alone is therefore insufficient. The ordered CCS test below is retained as the historical experiment, not a recommendation to repeat it. Collect the current failing boot before further parameter or driver changes; the archive will also establish effective CCS state and the loaded module identity. No new host or Windows trace accompanied this result.
+**Latest evidence supersedes this historical CCS test:** three valid reuploaded captures all show CCS enabled and a loaded source version matching the timestamp-patched build. They establish host PF DMA/CAT faults and GT resets. The user confirms unchanged settings and persistent Windows Code 43 across both VM attempts. Read [the current capture analysis](adlp-reuploaded-capture-analysis.md) and [the isolated ADL-P context experiment](adlp-indirect-offset-experiment.md). The CCS steps below document the earlier diagnosis; repeating that toggle is not the next test.
 
 ## First actionable finding
 
@@ -135,4 +135,4 @@ Current DKMS's ADL runtime-register export already includes `0x9144`. Working i9
 
 ## Status of the earlier patch
 
-The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The correct existing Xe CCS option has now been tried without resolving Code 43. The immediate next step is a fresh host capture and the Windows device startup status; a nested-Hyper-V discriminator remains conditional on evidence that Windows actually launches its hypervisor. No additional kernel workaround or MTL change was introduced for this log.
+The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The correct existing Xe CCS option has now been tried without resolving Code 43. The later full captures now narrow the next step to first-CAT context/mapping evidence and a separate ADL-P render-offset experiment. A nested-Hyper-V discriminator remains conditional on evidence that Windows actually launches its hypervisor. This historical CCS analysis introduced no additional driver change; see the newer experiment note for the current branch.

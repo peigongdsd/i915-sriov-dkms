@@ -1,18 +1,232 @@
 # Intel SR-IOV research: ADL-P first, then MTL/ARL
 
-Progress report · revision 8 · updated 2026-10-02T20:32:17+08:00
+Progress report · revision 10 · updated 2026-10-02T21:19:54+08:00
 
-This report supports the concrete goal of fixing Linux Xe SR-IOV on **ADL-P first**, then MTL/ARL, with minimal migration of i915 internals. Windows guest-driver analysis is supporting evidence for separating failure causes. Confirmed source facts, published observations, diagnostic hypotheses, and untested proposals are kept distinct. No host driver has been installed, no live GPU configuration has been changed, and no hardware reproduction has been performed in this research session.
+This report supports the concrete goal of fixing Linux Xe SR-IOV on **ADL-P first**, then MTL/ARL, with minimal migration of i915 internals. Windows guest-driver analysis is supporting evidence for separating failure causes. Confirmed source facts, published observations, diagnostic hypotheses, and untested proposals are kept distinct. The assistant has not installed a host driver, changed live GPU configuration or executed a hardware reproduction; user-supplied runtime captures are identified separately.
 
 ## Current assessment
 
-**Current task: MTL work is paused; ADL-P Windows Code 43 persists after the CCS correction.** The user now reports that enabling `xe.xelp_enable_ccs` did not resolve the failure. The incorrect i915-prefixed parameter was real, but correcting it was insufficient. The next evidence is a fresh host collector archive from the failing boot: actual Xe module/CCS state, full kernel log, VF/PF state and any surviving devcoredump. The earlier Nautilus RCS hang remains a prior-boot observation until the new logs establish whether it recurs. The supplied configuration sets `kvm_intel nested=0`; no new evidence establishes a nested Windows hypervisor failure. The collector was uploaded to `codex/Develop/collect-adlp-debug.sh`; remote SHA-256 readback and permanent-link resolution both passed. No further driver change has been inferred from generic Code 43.
+**Current task: MTL remains paused; the valid reuploaded ADL-P captures establish host PF DMA/CAT failures while Windows remains Code 43.** All three already have CCS enabled (`Y`, `RCU_MODE=1`). Loaded Xe `srcversion=E95FB913A81580FDE02EB10` matches the previously built timestamp-patched module. The first recorded failure is PF `00:02.0` DMAR write fault → host RCS CAT → failed engine reset → GT reset. VF1 owns GuC IDs 32767–65534, whereas CAT IDs 65/12/14/44 are host queues. The retained Looking Glass coredump is a later post-reset timeout, not the first CAT context. The second VM attempt faults before any new KVMFR export, so the first run's 12.633 ms export-to-fault timing is not a root-cause diagnosis. The user confirms unchanged settings and persistent Code 43 in both attempts.
+
+**New measured Linux context lead:** the pre-crash PF default RCS context has indirect-context offset register `0x21c8=0`, matching the observation in the pending ADL Xe proposal. A separate experimental branch, `codex/xe-adlp-indirect-offset-2026-10-02`, now initializes the Gen12 value `0xd << 6` (`0x340`) only for ADL-P render contexts and logs first-CAT queue ownership. Diagnostic-only commit `22a6e50` and combined experiment `ef7ad6b` both passed compilation, MODPOST and module linking against Linux 7.2.8, with independent code review. Hardware behavior remains untested. A fresh-boot run with the host Looking Glass client closed is a useful low-cost control; the test plan keeps guest driver/firmware/CCS fixed. See the current capture-analysis chapter immediately below for evidence and the test decision table.
 
 **ADL-P already has upstream Xe SR-IOV enablement, but its first failing stage must be identified.** Current upstream includes the platform flag, VF/PF ABI handling, GGTT provisioning, legacy interrupt path, and GuC submission. A VF that times out while recording its default context fails before Mesa starts. That points first to the initial context/GGTT/GuC/reset/interrupt sequence, not to speculative Mesa fixes or a blanket claim that 39-bit DMA is invalid.
 
 **The older MTL attempt progressed further than its default branch suggests.** The fork's June 18 trace branch records accelerated Windows rendering with persistent composition/video artifacts, successful sampled GGTT writes, and completed invalidations. Those observations constrain the remaining investigation; they do not prove all mappings or cache policies correct.
 
 **The nested-virtualization startup failure has a separate, concrete Windows-driver lead.** Intel officially acknowledges misclassifying nested Hyper-V as a native Hyper-V host in [KB 000102878](https://www.intel.com/content/www/us/en/support/articles/000102878/graphics.html). A public July report describes an earlier skipped startup-state transition leading to `STATUS_INVALID_PARAMETER` and Code 43. Intel's live KB still says investigation is ongoing; a closed community issue is not evidence of a shipped fix.
+
+## ADL-P: analysis of the reuploaded host captures
+
+2026-10-02. This supersedes the earlier CCS-configuration diagnosis as the current test plan. MTL work remains paused. The three replacement archives downloaded successfully from the requested `codex/Develop/` folder; their compressed streams and extracted regular files were validated. The raw captures, coredumps and decoded application memory remain private local evidence. This note contains selected diagnostic facts and hashes.
+
+### Result and next test
+
+The current failure includes **host PF DMA translation faults, render-engine CAT errors, failed engine recovery and full GT resets**. CCS is demonstrably enabled. The loaded Xe source-version identifier matches the module built from our patched branch. Neither an inactive CCS option nor an obviously different source build explains this run.
+
+The next useful hardware test is a **fresh host boot with the same Windows VM and the host Looking Glass client closed**, using RDP or another independent console to inspect the Intel device status. Retain the same guest driver, VF, CCS option and firmware. Capture immediately after the result, while the VM is still running and before VF teardown clears its state. This distinguishes a guest-startup/host-engine failure from the host presentation/import workload without changing the kernel first.
+
+The first run's KVMFR export occurs 12.633 ms before the first DMAR error. However, the second VM attempt faults before any new export is logged. That second attempt shares the already-faulted host boot. These observations justify a controlled test; they do **not** establish KVMFR as the root cause or exonerate it.
+
+### Archive provenance and what their names mean
+
+| Archive | Bytes | Capture time, UTC | SHA-256 |
+|---|---:|---|---|
+| `adlp-before-ccs.tar.gz` | 121469 | 12:37:09 | `73e581c04e8bc764745afa0a9d90b7f2950930d1597378be8894fa78b80af377` |
+| `adlp-after_vf_crash.tar.gz` | 198827 | 12:38:39 | `f801efce2d342ba42cd2b2ae7d1330429ff51edfc2d4de6b18dd572e08ea91a1` |
+| `adlp-after-ccs.tar.gz` | 200208 | 12:43:38 | `e6e76f0a72ed3033324208a696c1ee2d12dfec166a43f6b11fe80ccb363c122d` |
+
+All three report `xelp_enable_ccs=Y`, expose `ccs0`, and show actual `RCU_MODE=1`. The first archive is a pre-failure snapshot of an already CCS-enabled boot. These files are **not a CCS-off/CCS-on comparison**. Their kernel logs share the same boot prefix; the last extends the first failed VM run with a second VM start and more failures. The user subsequently confirmed that no other settings were changed between these attempts and Windows consistently showed Code 43. There is no successful Windows startup in this comparison.
+
+All three report Xe `srcversion=E95FB913A81580FDE02EB10`, matching `modinfo -F srcversion` on the locally built patched `xe.ko`. This is a source-version match, not a byte-for-byte module hash or hardware validation of the workaround. The unchanged package banner `2026.09.16-sriov` does not mean the timestamp fix is absent. Kernel is 7.2.8; ADL-P PF is `8086:46a6` at `0000:00:02.0`; its GuC is 70.49.4 and HuC 7.9.3. DG2 firmware lines belong to another GPU.
+
+The collector completed the relevant reads successfully. The initial zero-byte cloud objects were replaced by these valid archives and are no longer a blocker. No collector packaging change is inferred from the failed initial upload.
+
+### First VM attempt: ordered failure
+
+| Host uptime, seconds | Observation | What it establishes |
+|---:|---|---|
+| 379.553–379.795 | VFIO resets VF `00:02.1`; PF logs VF1 FLRs and VFIO logs reset completion | VF reset activity occurred before the error; these messages do not themselves report reset failure |
+| 388.713315 | KVMFR exports 16,384,000 bytes at shared-memory offset 5,701,632 | Buffer export, not proof of successful Xe attachment/mapping/submission |
+| 388.725948 | DMAR DMA Write, NO_PASID, requester **PF `00:02.0`**, address `0x78226a000`, reason 0x07 | First recorded IOMMU translation failure |
+| 388.725990 | RCS CAT error, GuC ID **65** | PF Xe successfully looked up a host queue for this notification |
+| 389.758524–389.788235 | GuC engine-reset request fails; Xe resets the GT | Failure affects the shared host graphics engine and recovery path |
+| 394.851709702 | Retained coredump snapshot, GuC ID **49**, Looking Glass | Later timeout, after the first GT reset; does not identify queue 65 |
+| 397.889554 | PF DMA fault `0x332792000`, CAT ID **12** | Further failure during the damaged run |
+| 408.507338 | PF DMA fault `0x4b0316000`, CAT ID **12** | Repeated failure |
+| 419.360718 | VF1 FLR during VM teardown | Subsequent VF state snapshots cannot reconstruct earlier negotiation/counters |
+
+The VF's actual reserved GuC-ID range is **32767–65534**, whereas the CAT IDs are small host IDs. Source independently corroborates this: `xe_guc_exec_queue_memory_cat_error_handler()` calls `g2h_exec_queue_lookup()` against the PF queue registry before printing the detailed CAT line. An unknown context follows a different error path. This identifies host execution involvement, while leaving a preceding VF-induced state disturbance possible. Names such as `systemd-logind` in timeout messages identify the DRM file's recorded owner, which can differ from the current submitting process if descriptors were shared.
+
+DMAR's “Next page table ptr is invalid” refers to **IOMMU tables**, not directly to a GPU GGTT/PPGTT root. The reported addresses fit comfortably within 39 bits. GPU VA width 47 and system DMA-address width 39 describe different address spaces. The configured default IOMMU passthrough policy does not establish the actual PF/VF domain mappings after assignment. Increasing DMA width or disabling translation is not supported by this evidence.
+
+### Second VM attempt: why the first timing correlation is insufficient
+
+The last archive adds VM startup around 706.6 seconds, VF resets around 708.6–708.9 seconds, and another first-for-that-attempt fault:
+
+| Host uptime, seconds | Observation |
+|---:|---|
+| 717.790880 | PF DMA-write fault `0x71d542000` |
+| 717.790895 | RCS CAT, GuC ID **14** |
+| 718.923369–718.953269 | Engine reset fails, then GT reset |
+| 727.339756 | PF DMA-write fault `0x426ed2000`, CAT ID 14 |
+| 730.862948–730.863106 | CAT ID **44**, DMA fault `0x77f46a000`, timeout identifying ID 44 as `systemd-logind` |
+| 735.115959–735.116312 | DMA fault `0x5af29a000`, CAT ID **14**, timeout identifying ID 14 as `systemd-logind` |
+| 738.386900 | First new `kvmfr_dmabuf_create` message in this VM attempt |
+| 741.501044 | A later timeout identifies Looking Glass queue **65**, during broader host failures |
+| 751.711915 | VF1 FLR at shutdown |
+
+There are KVMFR mappings before 717.79 seconds, but no newly logged buffer export then. Existing objects, previous reset damage and client configuration are not established by this log. Thus “each failure is immediately triggered by a new KVMFR export” is contradicted. Later Looking Glass queue 65 also cannot retroactively identify queue 65 in the first attempt: IDs are reused across destruction/reset.
+
+### Coredump: useful state, incomplete first-fault coverage
+
+The two post-failure archives contain the **same** 1,910,450-byte coredump, SHA-256 `d54b2ccdac910fe900d6cf6ebeba8416b500c612290be050a8ceafdf7e5dae32`. They are two collections of one retained dump, not independent first-fault captures.
+
+The dump describes Looking Glass queue 49/job 244 about **6.126 seconds after** the initial DMAR fault and **5.063 seconds after** the first GT reset completed. Its engine capture source is `Manual`. The RCS fault/address/ring registers are zero in that snapshot. “Full-capture” refers to register-capture coverage, not preservation of every queue, mapping or the original CAT event.
+
+All **26 ASCII85 sections**, totaling **6,320,128 decoded bytes**, were decoded with native-u32 ordering and checked against their declared lengths. A bounded search of 32-bit-aligned 64-bit address/PTE-page fields found none of the first run's three DMAR addresses. This is not a complete page-table walk: the dump contains selected GPU-VA/object contents, no IOMMU or SG DMA map, and `xe_vm_snapshot_capture()` includes only `XE_VMA_DUMPABLE` mappings. It cannot exclude imported buffers or identify which DMA allocation faulted.
+
+One concrete context observation deserves follow-up: RCS register **`0x21c8` (indirect-context offset) is zero** both in the pre-crash PF default LRC and the decoded later queue-49 LRC. The indirect-context pointer is populated. This matches the observation in the pending ADL offset discussion already recorded in the main report. It is a measured candidate, not proof that it caused queue 65's CAT fault, and is not a capture of Windows' own VF context. A separately gated A/B experiment has now been built; see [its exact commits, scope and test plan](adlp-indirect-offset-experiment.md).
+
+### VF provisioning and service state
+
+All captures agree on VF1's **2 GiB GGTT**, GuC IDs **32767–65534**, and doorbells **0–127**. The provisioned GGTT interval is `[0x7ee00000, 0xfee00000)`. The raw allocator node starts 2 MiB lower because `xe_ggtt` adds its WOPCM/start bias to zero-based allocator offsets; this is not an observed provisioning mismatch. All five default engine-context files are byte-identical across the captures.
+
+The eight exported runtime register values are also unchanged:
+
+| Register | Value |
+|---|---|
+| `0x0d00` | `0x80000014` |
+| `0x9118` | `0` |
+| `0x9134` | `0` |
+| `0x9138` | `1` |
+| `0x913c` | `0x3f` |
+| `0x9140` | `0xe00fa` |
+| `0x9144` | `0` |
+| `0xc1dc` | `0x90001` |
+
+The versions files show base/latest 1.0 without a negotiated VF line. Both post-failure captures were collected **after VF FLR**, which clears negotiated state and adverse-event counters. Consequently these snapshots prove neither that Windows skipped its handshake nor that no adverse event occurred. A bounded decode of the retained live/coredump CTBs found no valid preserved relay packets; raw `0x510x` payload words are not sufficient to identify relay headers. These reset/wrap-limited snapshots cannot recover the startup exchange.
+
+The source-backed differences remain secondary candidates: Xe requires a recorded 1.0 handshake before runtime queries whereas i915 does not enforce the same guard; i915 exports two additional clock registers. No EACCES response, failing runtime query or Windows consumption of those absent entries was observed. A new relay protocol, blanket negotiation bypass or speculative register-table copy is not justified.
+
+### Controlled retest and decision points
+
+1. Reboot the host to clear the existing sequence of engine/GT failures. Keep the tested kernel, `xe.xelp_enable_ccs=1`, GuC, VM topology and guest Intel driver fixed. Leave the host Looking Glass client closed, including any automatic client launch. Start the VM and inspect Windows' Intel device through RDP or another independent console. Record Code 43 and `DEVPKEY_Device_ProblemStatus`, plus the Intel driver version.
+2. While the VM is still running, immediately collect the host state using a fresh output path:
+
+   ```sh
+   sudo bash collect-adlp-debug.sh host 0000:00:02.0 /tmp/adlp-no-looking-glass
+   ```
+
+   Upload `/tmp/adlp-no-looking-glass.tar.gz` to the same `codex/Develop/` folder. The existing cloud script is sufficient. If a first DMAR/CAT fault appears, collect then; do not wait for repeated recovery or VM shutdown.
+3. If that run is stable, test the host client with direct DMA import disabled, preserving its other arguments:
+
+   ```sh
+   looking-glass-client app:allowDMA=no
+   ```
+
+   This is the documented B7 option. It retains KVMFR shared memory and host GPU rendering while disabling the client's direct dma-buf import; it does not disable all DMA or the guest capture service. Use a fresh host boot for each comparison after a fault. If this works, a further matched run with the normal client setting tests the import boundary. [Official Looking Glass B7 options](https://looking-glass.io/docs/B7/usage/#all-command-line-options).
+
+| Result | Next target |
+|---|---|
+| No-client run: Windows starts and host stays clean; normal client reproduces fault | Host presentation/import mapping and lifetime; compare DMA-disabled client before blaming guest startup |
+| No-client run: Windows remains Code 43 but host stays clean | Separate Windows startup status and PF/VF service trace; the host fault is not sufficient to explain Code 43 |
+| No-client run: host still reports DMAR/CAT during guest initialization | Shared engine/context/GuC/VF transition and IOMMU ownership; prioritize first CAT owner and fault-address mapping |
+| Host faults before any VM starts | Native ADL-P Xe stability, including the measured indirect-context offset; guest startup is not a necessary trigger |
+
+If the failure survives this control, the next Linux diagnostics should preserve **first-CAT queue ownership before reset**, relevant saved LRC fields and the faulting DMA address's allocation/domain. If the import path is isolated, add attachment-device, original/mapped SG counts, IOVA ranges and map/unmap timing. If Windows alone fails, capture handshake/runtime responses before teardown. These are narrower and more informative than another broad i915-to-Xe port.
+
+The measured zero-offset observation now supports the built, separately gated **ADL-P render-context experiment**, with first-CAT ownership diagnostics. It is not an accepted upstream fix or a demonstrated Windows repair. The existing accepted timestamp correction remains valid Linux code, but the current user result shows that it and CCS enablement have not resolved this Windows case. No Windows binary modification or MTL work is included.
+
+---
+
+## ADL-P render indirect-context experiment
+
+2026-10-02. This is an isolated Linux Xe experiment motivated by the user's actual captures, not a demonstrated Windows Code 43 fix. MTL work remains paused.
+
+### Why this change is now testable
+
+The supplied **pre-crash** PF default RCS context has an indirect-context pointer but register `0x21c8` is zero. A later saved host LRC also has zero there. Working i915 initializes the Gen12 render field to `0xd` in bits 15:6, giving register value **`0x340`**. The recent Xe discussion identifies the same zero default-image observation after an earlier change stopped explicit programming. [Intel review](https://lkml.rescloud.iu.edu/2609.3/17001.html), [author's default-context follow-up](https://www.mail-archive.com/dri-devel@lists.freedesktop.org/msg640961.html).
+
+This is stronger evidence for a controlled context experiment than generic Code 43. It remains weaker than a causal reproduction: the retained dump follows the first GT reset, the first CAT queue's context was not captured, and Windows constructs its own VF contexts. A PF correction can affect shared engine/default-context behavior without directly changing Windows' LRC construction.
+
+### Exact code and scope
+
+Repository: `git@github.com:peigongdsd/i915-sriov-dkms.git`.
+
+| Revision | Purpose | Local Xe srcversion |
+|---|---|---|
+| Existing `codex/xe-adlp-2026-10-02` at `a29999e2aa746782f05c8ed1e9e17811267dd914` | Accepted timestamp correction and original diagnostics collector; matching source version observed in user captures | `E95FB913A81580FDE02EB10` |
+| `22a6e50e08f48048fff4d3ddceeaf0b4401ddaa3` | First-CAT diagnostics only; no offset behavior change | `A7F071ECFA1550AA20DF3BA` |
+| `ef7ad6b9a803f84153161aa8dc6c3ef8dbe50c83` | Same diagnostics plus the ADL-P render offset experiment | `786184C2F6AEDD74A6B2FDB` |
+
+The new branch is **`codex/xe-adlp-indirect-offset-2026-10-02`**. Later commits on it may update documentation; the two immutable source commits above identify the code. Source-version values are references from these builds, not cryptographic identities of every possible downstream build.
+
+The behavior change is in existing `setup_indirect_ctx()` in `drivers/gpu/drm/xe/xe_lrc.c`. After writing the indirect-context pointer, it writes:
+
+```c
+if (lrc_to_xe(lrc)->info.platform == XE_ALDERLAKE_P &&
+    hwe->class == XE_ENGINE_CLASS_RENDER)
+	xe_lrc_write_ctx_reg(lrc, CTX_CS_INDIRECT_CTX_OFFSET,
+			     REG_FIELD_PREP(REG_GENMASK(15, 6), 0xd));
+```
+
+This reaches initial Linux kernel contexts/default-context recording as well as later Linux render contexts. It uses the existing Xe LRC lifecycle. It does not adopt the proposal's broad all-pre-Xe2 condition, alter compute/video/copy offsets, change DMA width or add a relay protocol. The source descriptor covers ADL-P and any PCI subplatform that Xe classifies under `XE_ALDERLAKE_P`; the condition is on the driver platform enum, not a marketing name.
+
+The diagnostic commit adds two messages when Xe receives a CAT notification for an ADL-P single-width render queue:
+
+```text
+ADLP CAT owner: guc_id=... flags=... in ... [...]
+ADLP CAT saved LRC: ggtt=... per_ctx=... indirect=... offset=...
+```
+
+It obtains an LRC reference using the existing queue helper and releases it after reading saved context memory. It adds no live MMIO reads, forcewake, waits or mapping changes. The owner is the **DRM file's recorded process/PID**, which can differ from the current submitter when a file descriptor is shared. The saved fields are not an atomic live hardware snapshot. Existing recovery remains in place. This provides the previously missing first-CAT context identity even when the only later coredump belongs to another queue.
+
+### Validation performed
+
+Both the diagnostic-only revision and the combined experiment compiled and relinked the complete Xe module successfully against the same Linux **7.2.8** headers. `MODPOST` passed, and the compatibility-module target remained valid. Incremental compilation reused unchanged objects from the previously successful full build. Both changes received an independent static review of field encoding, platform/class gates, call-path coverage, queue/LRC lifetime and lock use.
+
+The headers-only build environment lacked `vmlinux`, so BTF generation was skipped; it also reported the existing pahole-version warning. These are retained in the build logs. No module was loaded by the assistant and no hardware outcome is claimed.
+
+Records: [diagnostic build](patches/adlp/cat-diagnostics-build-verification.json), [experiment build](patches/adlp/indirect-offset-build-verification.json), [diagnostic log](patches/adlp/build-cat-diagnostics-7.2.8.log), [experiment log](patches/adlp/build-indirect-offset-7.2.8.log).
+
+### How to test on the ADL-P host
+
+Keep an existing working boot generation available. This changes when an indirect batch runs during context restoration, so stability must be checked as well as Windows startup.
+
+1. A cheap initial control is a fresh host boot on the existing build, with the host Looking Glass client closed. Start the unchanged VM and inspect the Intel device through RDP or another independent console. The prior two VM attempts used unchanged settings but shared a boot containing earlier GT resets. This clean control has not yet been recorded.
+2. Point the existing Xe package source at **`ef7ad6b9a803f84153161aa8dc6c3ef8dbe50c83`** (or the new experimental branch head), using the same NixOS packaging/build method as the previous test. Rebuild the boot configuration and reboot the host. Retain `xe.xelp_enable_ccs=1`, one VF, GuC 70.49.4 and the same Windows driver. No Windows-driver reinstall is required for this experiment.
+3. Before launching the VM, collect a baseline with the already uploaded script:
+
+   ```sh
+   sudo bash collect-adlp-debug.sh host 0000:00:02.0 /tmp/adlp-offset-before-vm
+   rg '0x21c8' /tmp/adlp-offset-before-vm/debug-tile0_gt0_default_lrc_rcs.txt
+   ```
+
+   Expect register **`0x21c8 = 0x00000340`**, and CCS should still be `Y`. Also retain `module-srcversion.txt`. If the image still shows zero, report that before interpreting Windows results: it could mean the wrong build booted or that the field did not survive default-context capture.
+4. Start the same Windows VM with the host Looking Glass client closed initially. Record separately: Windows Code 43 / problem NTSTATUS, first host DMAR/CAT time, whether native host graphics remain responsive, and whether the new diagnostic reports `offset=0x00000340` on a failing queue. If stable, repeat the normal client workload to test the original trigger.
+5. Immediately after the first result, **before shutting down the VM**, collect:
+
+   ```sh
+   sudo bash collect-adlp-debug.sh host 0000:00:02.0 /tmp/adlp-offset-after-vm
+   ```
+
+   Upload both `.tar.gz` files to `codex/Develop/`. The collector already includes the relevant saved LRC, kernel log, module identity, PF/VF state and surviving devcoredump. Avoid waiting through a reset storm; the useful event is the first failure.
+
+For the cleanest code A/B, compare `22a6e50` (diagnostics only) against `ef7ad6b` (same diagnostics plus offset). Use a fresh host boot for each, with unchanged guest/client conditions. This avoids confusing better diagnostics with an offset effect. Returning to the previous boot generation rolls back the experiment.
+
+### Interpret each outcome separately
+
+| Observation with verified offset 0x340 | Conclusion and next action |
+|---|---|
+| Host stays clean and Windows starts | Evidence for this narrow fix; repeat matched diagnostics-only versus offset boots before promoting it |
+| Host faults disappear but Windows remains Code 43 | Host context issue and guest startup failure are separate; retain this result and investigate guest NTSTATUS/service sequence |
+| Host still reports DMA/CAT errors | Use the new first-CAT owner/LRC fields to locate the failing object/domain; offset alone is insufficient |
+| No VM is running and native graphics regress | Roll back and retain the first host capture; this experimental context change is unsuitable as-is |
+
+The second and third outcomes remain plausible. Missing service negotiation, clock-register compatibility and nested Windows classification are still separate hypotheses; none is established by the post-FLR snapshots. This branch is a measured, minimal experiment toward a Linux fix, not a declaration that the remaining guest problem is solved.
+
+---
 
 ## Executive synthesis: Linux Xe repair, ADL-P first
 
@@ -30,7 +244,7 @@ The design constraint is to reuse Xe's existing abstractions and relay transport
 | MTL Windows accelerates but corrupts composition/video | The June fork records successful sampled updates and completed invalidations; declared i915/Xe PAT and MOCS tables already match | Locate one corrupt surface before presentation; trace its PPGTT, command/surface MOCS, AUX metadata and producer/consumer synchronization against working i915 | Preserve Xe-native MTL bring-up; repair the measured per-surface, per-engine or PF/GuC contract |
 | ARL is assumed equivalent to MTL | The current Xe PCI IDs share the MTL descriptor, but firmware/IP/stepping differ by SKU | Record device ID and graphics/media versions, then repeat the smallest MTL reproduction | Gate fixes by actual affected IP/stepping and validate each target |
 
-Three tempting shortcuts are specifically unsupported. Increasing ADL's DMA width does not follow from a PF-tagged IOMMU fault. Applying a blanket indirect-context-offset patch does not follow from an intermittent native-rendering hang or an inconclusive bisect. Replacing MTL's AUX-map architecture with Xe2 FlatCCS, or globally rewriting GGTT PAT indices, does not identify the defective Windows surface policy.
+Three tempting shortcuts are specifically unsupported. Increasing ADL's DMA width does not follow from a PF-tagged IOMMU fault. Applying a blanket all-platform indirect-context-offset patch does not follow from the ADL-P observation; the new experimental branch is narrowly gated and unvalidated on hardware. Replacing MTL's AUX-map architecture with Xe2 FlatCCS, or globally rewriting GGTT PAT indices, does not identify the defective Windows surface policy.
 
 The modern alternatives are already substantial: RTP entries feed GuC ADS register preservation, Xe supplies BO/VM_BIND and coherency machinery, shared-GGTT/per-GT provisioning exists, and firmware-authorized direct GSM access is a legitimate MTL PF backend. Remaining hardware and guest-protocol requirements should be expressed through those mechanisms. This study has produced narrowed targets and reproducible classifier evidence; it has not yet produced a hardware-validated repair for the user's ADL-P or MTL/ARL case.
 
@@ -44,7 +258,7 @@ The modern alternatives are already substantial: RTP entries feed GuC ADS regist
 | Accepted upstream source | `38631a7bce195b88814b93bf2b6d3e48c827fef2`, authored September 25, accepted October 1, 2026 |
 | Code delta | `drivers/gpu/drm/xe/xe_lrc.c`: 25 insertions, 13 deletions |
 | Build | **Passed, exit 0:** complete `xe.ko` and `intel_sriov_compat.ko` against Linux 7.2.8 development headers; GCC 16.2.0 and binutils supplied through a Nix build environment |
-| Runtime validation | No driver installation, module load, VF creation or hardware test performed |
+| Runtime validation | Assistant performed no installation or hardware execution. User captures now show a matching loaded source version with CCS enabled, but Windows still fails and the PF reports DMA/CAT errors. |
 | Repository delivery | Both new branches pushed over SSH and verified by remote ref readback; initial ADL-P publication head `2576d0c17909fc5ef450744009c7d4df6528730f` |
 
 The build completed `MODPOST` and linked both modules without unresolved-symbol errors. The log records a missing optional Nix channel path, a `pahole` version warning, and skipped BTF generation because `vmlinux` was unavailable. Those environment limitations are retained in `patches/adlp/build-7.2.8.log`; build success establishes compilation/linkage for this kernel, not GPU correctness or all-kernel DKMS compatibility.
@@ -60,7 +274,7 @@ The incorrect rebase had placed `Wa_16010904313` in both the indirect context an
 
 This retains the existing workaround applicability gate and Xe's context/buffer lifecycle. It introduces no i915 memory-management code, GGTT relay implementation, new platform-enablement flag or MTL workaround. The clean sync branch is the comparison baseline; the user's historical MTL branches remain separate.
 
-The earlier baseline-versus-backport Linux VF comparison remains useful for validating the Linux context correction. The user has now tried the correct Xe CCS option and reports that Windows still fails. A fresh capture of host failure state and the Windows startup status is the next discriminator; no further kernel workaround is justified by Code 43 alone. The source correction does not by itself repair Windows' environment classifier or establish that a VF failure before context execution is caused by this workaround.
+The earlier baseline-versus-backport Linux VF comparison remains useful for validating the Linux context correction. The valid user captures now establish a matching loaded source version, active CCS, PF DMA/CAT failures and a zero indirect-context offset in the pre-crash default RCS image. These measured observations motivate a separate, narrowly gated context experiment; they do not prove why Windows reports Code 43. The source correction does not by itself repair Windows' environment classifier or establish that a VF failure before context execution is caused by this workaround.
 
 ## Work completed and work now underway
 
@@ -513,7 +727,7 @@ The cross-layer implication is useful for the original Xe study: an identical ne
 
 2026-10-02. MTL work is paused at the user's request. This note analyzes the supplied 82-line host log; the assistant has not reproduced this machine's failure. The exact running driver commit, Windows driver version, Windows hypervisor state and complete host log were not supplied with that excerpt.
 
-**Latest user result:** enabling the correct Xe CCS option still leaves Windows with Code 43. The configuration correction alone is therefore insufficient. The ordered CCS test below is retained as the historical experiment, not a recommendation to repeat it. Collect the current failing boot before further parameter or driver changes; the archive will also establish effective CCS state and the loaded module identity. No new host or Windows trace accompanied this result.
+**Latest evidence supersedes this historical CCS test:** three valid reuploaded captures all show CCS enabled and a loaded source version matching the timestamp-patched build. They establish host PF DMA/CAT faults and GT resets. The user confirms unchanged settings and persistent Windows Code 43 across both VM attempts. Read [the current capture analysis](adlp-reuploaded-capture-analysis.md) and [the isolated ADL-P context experiment](adlp-indirect-offset-experiment.md). The CCS steps below document the earlier diagnosis; repeating that toggle is not the next test.
 
 ### First actionable finding
 
@@ -646,4 +860,197 @@ Current DKMS's ADL runtime-register export already includes `0x9144`. Working i9
 
 ### Status of the earlier patch
 
-The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The correct existing Xe CCS option has now been tried without resolving Code 43. The immediate next step is a fresh host capture and the Windows device startup status; a nested-Hyper-V discriminator remains conditional on evidence that Windows actually launches its hypervisor. No additional kernel workaround or MTL change was introduced for this log.
+The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The correct existing Xe CCS option has now been tried without resolving Code 43. The later full captures now narrow the next step to first-CAT context/mapping evidence and a separate ADL-P render-offset experiment. A nested-Hyper-V discriminator remains conditional on evidence that Windows actually launches its hypervisor. This historical CCS analysis introduced no additional driver change; see the newer experiment note for the current branch.
+
+
+---
+
+## ADL-P after CCS enable: bounded runtime-service audit
+
+**Later capture update:** the replacement archives and second VM attempt are analyzed in [the current capture note](adlp-reuploaded-capture-analysis.md). All have CCS enabled; the second attempt faults before any new KVMFR export. The user confirms unchanged settings and persistent Code 43. A separate [ADL-P render-context experiment](adlp-indirect-offset-experiment.md) is now built for testing. The source distinctions below remain evidence, not established causes.
+
+Inspected on 2026-10-02. Baseline: `strongtz/i915-sriov-dkms` commit `f4cb98f4c28e1f3ac78ca88501a87c86d0c21a88`. Windows binary: official 32.0.101.7092 `igdkmdn64.sys`, SHA-256 `454624942bf9a79a75fd1bfe6c6a2f8d499aabef45cb4268a1353d527902d098`. The actual failing guest's module hash/version has not been established by this inspection. This is source and original-binary analysis, not a GPU test. No driver source or configuration was changed.
+
+The user reports Code 43 persists after enabling CCS. The previously supplied log established a separate PF render-engine timeout in host `.org.gnome.Naut`; it did not establish the first failed guest operation. Preserve that PF coredump and correlate a fresh occurrence with guest startup before assuming an isolated guest-only failure.
+
+### There is no demonstrated ABI 0.1 versus 1.0 version mismatch
+
+The actual working-i915 comparison source defines both base and latest ABI as **1.0**, in `drivers/gpu/drm/i915/gt/iov/abi/iov_version_abi.h:9`. Xe defines the same values in `drivers/gpu/drm/xe/abi/guc_relay_actions_abi.h:24`.
+
+For the valid two-word CT handshake, i915 `intel_iov_service.c:265` and Xe `xe_sriov_pf_service.c:41` both choose 1.0 for a 0.0 ANY request or a newer major, accept a 1.x request with negotiated minor zero, and reject an explicit 0.1 request. Their Linux rejection errno differs; their accepted version sets do not. The Windows handshake bytes have not been recovered or observed. Downgrading Xe's ABI declaration to 0.1 is therefore unsupported by this comparison.
+
+### A real sequencing difference deserves a trace
+
+Xe records successful handshake state per VF, then requires negotiated ABI 1.0 before serving `VF2PF_QUERY_RUNTIME` (action `0x0101`): `xe_gt_sriov_pf_service.c:329` returns `-EACCES` if that state is missing. `xe_sriov_pf_service.c:176` clears the state when the VF connection is reset. Its successful-handshake path logs the negotiated version.
+
+i915's CT handshake sends a reply without recording corresponding negotiated state (`intel_iov_service.c:308`). Its request dispatcher (`:450`) directly invokes the runtime handler; `pf_reply_runtime_query` (`:314`) checks message length and range but has **no equivalent negotiation-state check**. Thus a guest that queries before handshaking, or reuses pre-reset assumptions, can encounter different behavior. That is a concrete difference in PF behavior, **not evidence that Windows actually does this**.
+
+The most discriminating service trace is the VF-specific order and replies: handshake action `0x0001`, runtime action `0x0101`, each reset/FLR, negotiated version, and first failing reply. A successful 1.0 handshake followed by successful runtime pages rules out this particular ordering explanation for that startup. A runtime request rejected with EACCES before negotiation would establish the missing edge and justify a narrowly scoped compatibility decision rather than an ABI-number change.
+
+Verbose service-action logging in `xe_gt_sriov_pf_service.c:382` is conditional on `CONFIG_DRM_XE_DEBUG_SRIOV` through `xe_gt_sriov_printk.h:30`; enabling dynamic debug cannot restore code compiled out by that option. Ordinary successful-handshake logging is not that verbose-only macro. A diagnostic patch, if needed, should log action, VF, result and reset sequence without changing acceptance policy first.
+
+### Two missing clock registers are real, but VF consumption is unproved
+
+At this pinned source, Xe's TGL-family runtime list exports eight register/value entries, whereas i915 exports ten. The additional i915 entries are `CTC_MODE` (`0xA26C`) and `GEN9_TIMESTAMP_OVERRIDE` (`0x44074`): `xe_gt_sriov_pf_service.c:24` versus `intel_iov_service.c:31`. `0x9144` is already present in this DKMS Xe and must not be proposed as a newly missing entry merely because bare mainline differs. The public service returns raw register values, so the EU_ENABLE/EU_DISABLE source-name difference does not itself imply transformed values.
+
+Runtime query `0x0101` is **enumeration by start index and limit**, returning offset/value pairs and remaining count; it does not request a named register address. A trace will therefore show which pages Windows obtains, not a literal request for CTC_MODE. Compare the complete PF runtime maps plus response pages from working i915 and failing Xe with an unchanged guest.
+
+Original 7092 code supports the following narrower statements; all addresses below are RVAs for the hashed file:
+
+- `0x3D236D–0x3D2425` reads `0xA26C`, `0xD00`, and conditionally `0x44074`, computes a clock frequency, and stores it in a nested object's `+0x7F4`. The non-override path derives a nonzero standard frequency from RPM_CONFIG0. A missing CTC_MODE that reads as zero therefore does **not by itself imply an immediate fatal error** in this arithmetic.
+- Leaf `0x3D1120` follows nested-object `+0x728` to the adapter, then invokes the function at adapter-vtable `+0xF8` through Control Flow Guard dispatch. The VF-specific target of that callback has **not** been proved.
+- `0x269590` searches cached `(offset, value)` pairs: primary GT uses adapter `+0x56BB0` count and `+0x56BB8` pointer; media GT uses `+0x56BC0/+0x56BC8`. If absent, it writes zero through its output argument and logs. This is an actual cache helper, but a call edge from the clock reader to it was not established.
+- `0x269A10–0x269D1E` creates a cache from a platform register list (`+0x5AC80/+0x5AC88`) and reads each value through the same vtable `+0xF8` callback. This function contains no proved PF-runtime relay transaction. It can describe native capture; it cannot by itself prove VF negotiation or consumption of PF data.
+- Several platform initialization functions install ten-entry lists; for example `0x26C540` installs internal platform `0x25`, a list at RVA `0x8A61E0`, and count ten. This pass did not complete the PCI-ID-to-initializer selection for ADL-P `46A6`. Tables selected for other generations are not ADL-P evidence.
+
+Raw instruction evidence: `windows/analysis/7092/runtime-register-consumers.txt`, `runtime-register-xrefs.txt`, `runtime-query-flow.txt`, `runtime-table-select.txt`, `runtime-count-xrefs.txt`, `runtime-cache-xrefs.txt`, and `runtime-list-xrefs.txt`. The PE exception table omits some leaf functions and splits other functions; a preceding exception-table entry alone must not be treated as a valid function boundary. `runtime-register-consumers.txt` explicitly appends the verified complete `0x3D1120` leaf after the initial exploratory disassembly.
+
+### Evidence-ranked next action
+
+First capture the PF render failure/coredump and the first VF service/submission failure during the same unchanged-guest startup. In that capture, discriminate the concrete handshake-state difference before altering ABI policy. Compare the full runtime maps; if negotiation succeeds and the guest consumes the returned map, an isolated two-register exposure A/B is a small plausible compatibility experiment, but still requires measured startup behavior and timing values. There is no present justification to migrate i915's complete service implementation or introduce an additional relay protocol for ADL-P.
+
+The prior Hyper-V binary findings remain conditional on actual guest CPUID and Hyper-V state; they do not explain a controlled i915-success/Xe-failure pair by themselves. Neither this audit nor the previous classifier emulation proves a path from these two absent registers to Code 43.
+
+
+---
+
+## ADL-P: first PF DMA fault after enabling CCS
+
+**Later capture update:** the replacement archives and second VM attempt are analyzed in [the current capture note](adlp-reuploaded-capture-analysis.md). All have CCS enabled; the second attempt faults before any new KVMFR export. The user confirms unchanged settings and persistent Code 43. A separate [ADL-P render-context experiment](adlp-indirect-offset-experiment.md) is now built for testing. The source distinctions below remain evidence, not established causes.
+
+Inspected 2026-10-02 from the user-supplied full host log (SHA-256 `12d4699b3e4f63e22377514554835e123a3ef00c4bda95e508e42a720d425e8b`). Driver-source comparison is pinned to `strongtz/i915-sriov-dkms` `f4cb98f4c28e1f3ac78ca88501a87c86d0c21a88`; upstream DMAR logging was checked at Linux `ce1e0223d8ad4211275c82a17ed6d43ab81e13d9`. No code or configuration changes.
+
+### The first recorded failure is host PF DMA translation
+
+CCS and the 47-bit GPU-VA restriction are explicitly enabled in this log. VF1 is provisioned with 2 GiB GGTT and 32768 context IDs, then passed through as `00:02.1`. At 379.686927 seconds VFIO resets that VF and the PF reports its FLR.
+
+The useful event ordering is:
+
+| Time, seconds | Event |
+|---:|---|
+| 388.713315 | `kvmfr_dmabuf_create`, size 16,384,000, offset 5,701,632 |
+| 388.725948 | DMAR **DMA Write NO_PASID**, requester **00:02.0**, address **0x78226a000**, reason 0x07, next page-table pointer invalid |
+| 388.725990 | Xe PF render engine CAT error, GuC context ID **65** |
+| 389.758524 | Engine reset request fails; GT reset follows |
+| 394.857801 | Host `looking-glass-c` queue 49 times out; coredump created |
+| 394.887485 | Host `systemd-logind` queue 21 times out |
+| 397.889554 | Another PF DMA-write fault, address 0x332792000; CAT context ID 12 |
+| 408.507338 | Another PF DMA-write fault, address 0x4b0316000; CAT context ID 12 |
+
+The first DMA-buffer creation precedes the first DMAR fault by 12.633 ms. This is a useful correlation, not proof the exported buffer contains the faulting address. The first CAT queue is **65**, so the later Looking Glass timeout on queue **49** cannot be substituted as an identification of that original queue's process. IDs can also change across resets.
+
+DMAR's wording refers to the **IOMMU translation tables** for the request, not directly to a malformed Intel GPU GGTT/PPGTT entry. The kernel prints the requester from the hardware source ID (`drivers/iommu/intel/dmar.c:1983`). It says PF `00:02.0`, not VF `00:02.1`. A bad GPU mapping could still generate an inappropriate DMA address, but that preceding causal step is not established by the DMAR record alone.
+
+The fault address is below 2^35 and therefore below the reported 39-bit host-address limit (2^39). The separately configured 47-bit **GPU virtual-address** limit is a different address space. This record does not support a 39-versus-47-bit overflow diagnosis. `NO_PASID` is not itself proof that SR-IOV was disabled or misidentified.
+
+### Xe explicitly found a host queue for the CAT event
+
+In `drivers/gpu/drm/xe/xe_guc_submit.c:3001`, the CAT handler obtains the reported GuC ID and calls `g2h_exec_queue_lookup`. That lookup at `:2779` loads from this Xe device's `submission_state.exec_queue_lookup` XArray. If no queue is found, the handler returns EPROTO before printing the detailed `class=rcs ... guc_id=65` message. Unknown PF/VF context has a distinct generic error path at `:3017`.
+
+Therefore the supplied detailed message means the PF driver successfully matched the notification to one of its own execution-queue objects. It does not prove the exact userspace owner of that queue or exclude an earlier cross-VF hardware-state disturbance, but it is stronger evidence of host execution involvement than treating every failure after guest launch as a guest context.
+
+The VF's context IDs are reserved in the PF ID manager and unavailable for PF allocation (`xe_gt_sriov_pf_config.c:887–951`). The manager reserves high IDs for VF ranges and allocates ordinary submissions from the low end (`xe_guc_id_mgr.c:132`). A captured provisioning range can confirm the actual split; do not infer an exact range from quota alone. Existing `xe_exec_queue_memory_cat_error` and queue/job tracepoints can preserve context ID 65 before reset churn; the stock CAT tracepoint does not itself include userspace process ownership.
+
+### No ADL-P GGTT VF-ID encoding mismatch found
+
+i915 ADL-P uses `TGL_GGTT_PTE_VFID_MASK` bits 4:2, then adds PRESENT (`intel_gtt.h:119`, `intel_ggtt.c:2143–2172`). Xe uses bits 11:2 plus PRESENT (`regs/xe_gtt_defs.h:17`, `xe_ggtt.c:943`). For the supported VF IDs 1 through 7 these encodings are identical; VF1's initial ownership PTE is 0x5 in both. The wider Xe mask alone is not an ADL-P incompatibility.
+
+Both drivers reserve a GGTT region, tag the region with its VF ID and invalidate, then send its start/size to GuC: i915 `intel_iov_provisioning.c:688–702` and `intel_ggtt.c:2175`; Xe `xe_gt_sriov_pf_config.c:534–546` and `xe_ggtt.c:948–981`. The software implementation therefore contains the expected ownership operation. Actual post-FLR PTE contents and timing still require capture if suspicion remains.
+
+PF-owned GuC ADS/golden-context buffers being mapped under PF identity is not inherently incorrect. Xe copies its captured default LRC into its ADS in `xe_guc_ads.c:972`; this inspection did not prove a Windows VF context copies a PF-only address or later writes it under the wrong identity. The existing reset-BB-stack-pointer-on-VF-switch GuC workaround is already enabled for ADL-P by Xe's graphics-version range and the observed 70.49.4 firmware (`xe_wa_oob.rules:48`, `xe_guc_ads.c:328`); importing i915's same workaround again is not a supported fix.
+
+### DMA-buffer import is an immediately separable path
+
+For an external DMA buffer, Xe attaches to the importing DRM device (`xe_dma_buf.c:389`), maps it with `dma_buf_map_attachment(..., DMA_BIDIRECTIONAL)` during `xe_bo_move_dmabuf` (`xe_bo.c:736–775`), and consumes scatterlist **DMA** addresses (`xe_res_cursor.h:336`). i915 likewise maps its imported attachment through the DMA-buffer API (`gem/i915_gem_dmabuf.c:238–263`). Neither examined path deliberately uses a VF's device to map a host Looking Glass buffer.
+
+The current official [Looking Glass kvmfr exporter](https://github.com/gnif/LookingGlass/blob/master/module/kvmfr.c#L99) maps exported pages with the attachment device's DMA API and unmaps them when requested. That source is an external comparison; the exact loaded kvmfr revision has not been established. Xe's mapping lifetime follows TTM movement and differs from i915's object page lifetime. No mapping-lifetime bug or faulting-buffer address has been proved here.
+
+The smallest useful hardware discriminator is a fresh same-guest boot with the **host Looking Glass client stopped**, preserving the VF, guest driver and firmware. Read Windows device status independently of Looking Glass. If Code 43 and the PF CAT/DMAR fault disappear, then reproduce by starting Looking Glass and narrow its DMA-buffer path. If Code 43 remains without PF DMA faults, there may be a separate guest-start problem and the two symptoms must not be conflated. Stopping the client after the first GT corruption is weaker than a fresh startup.
+
+Subsequent recovered capture correction: a second VM start in this same already-faulted boot produces its first new PF DMA fault at 717.790880 seconds, **before** the first new `kvmfr_dmabuf_create` at 738.386900. At 735.116206, CAT queue14 is followed 106 microseconds later by a queue14 timeout attributed to host `systemd-logind`. Therefore the first-run 12.633 ms correlation does not establish that a fresh KVMFR export triggers every fault. This second run is not a clean reboot and cannot rule out prior mapping/state damage either. Keep the client-stopped test as isolation, not a diagnosed fix.
+
+For a code-level capture, correlate the first CAT queue with its VM, relevant GPU PTEs and DMA mapping addresses; record imported-buffer attachment device, direction, mapped SG DMA ranges and map/unmap lifetime. Determine whether 0x78226a000 belongs to a current PF DMA mapping or an imported kvmfr range. Only then select a mapping, ownership or lifetime correction. The older runtime-register/handshake hypotheses remain documented in `adlp-runtime-contract-audit.md`, but the new first-fault evidence gives this DMA/execution path priority.
+
+
+---
+
+## ADL-P host DMA fault near Looking Glass import
+
+**Later capture update:** the replacement archives and second VM attempt are analyzed in [the current capture note](adlp-reuploaded-capture-analysis.md). All have CCS enabled; the second attempt faults before any new KVMFR export. The user confirms unchanged settings and persistent Code 43. A separate [ADL-P render-context experiment](adlp-indirect-offset-experiment.md) is now built for testing. The source distinctions below remain evidence, not established causes.
+
+Bounded source review, 2026-10-02. MTL work remains paused. No module was built, loaded, unloaded or patched; no VM or configuration was changed.
+
+### Assessment
+
+The supplied log makes the **Linux host Looking Glass / dma-buf import path a priority discriminator**, but does not establish kvmfr as the cause. The first IOMMU fault names PF `0000:00:02.0`, immediately followed by a host Xe render-engine CAT error and later host GT resets. Treating this excerpt as proof of an independent Windows-driver startup rejection is premature. Conversely, the excerpt does not identify the first faulting buffer or its owning process, so the first queue must not be labelled Looking Glass solely from timing.
+
+The first test should be a fresh run **without the Looking Glass client**, observing the guest through an independent path. For a stronger Looking Glass-free control, also stop guest Looking Glass capture. If that run succeeds, repeat with the same shared-memory setup and the supported B7 client option:
+
+```sh
+looking-glass-client app:allowDMA=no
+```
+
+Preserve any other existing client arguments. This disables the client's direct dma-buf import while retaining `/dev/kvmfr0` shared memory and normal host GPU rendering. It does **not** disable guest capture, all GPU DMA, or the kvmfr module itself. Thus it is more specific than removing the entire shared-memory device from the VM. The [official B7 option documentation](https://looking-glass.io/docs/B7/usage/#all-command-line-options) and pinned source both support the option. Current development master uses `lgmp:allowDMA` as its canonical spelling but retains `app:allowDMA` as a compatibility alias.
+
+### What the supplied log proves
+
+Input: the supplied `pasted-text.txt`, SHA-256 `12d4699b3e4f63e22377514554835e123a3ef00c4bda95e508e42a720d425e8b`. Source pins and exported source copies are in `evidence/adlp-kvmfr/`.
+
+| Timestamp | Observation |
+|---|---|
+| 7.518967 | kvmfr creates one static device. |
+| 377.515628 and later | `/dev/kvmfr0` is mapped with size 134217728 bytes. |
+| 388.713315 | kvmfr exports size 16384000, offset 5701632. |
+| 388.725941 | DMAR fault handler runs, 12.626 ms after the export log. |
+| 388.725948 | DMA Write, NO_PASID, requester PF `00:02.0`, address `0x78226a000`, reason `0x07`: next page-table pointer invalid. |
+| 388.725990 | Xe render-engine CAT error, GuC queue ID 65. |
+| 389.758529–389.788235 | Engine-reset recovery escalates to a host GT reset. |
+| 394.887497 | A later timeout identifies `looking-glass-c` PID 6948, GuC queue 49. |
+
+The first DMAR error line is 12.633 ms after export; the often quoted 12.626 ms is to entry into the fault handler. The later named queue 49 is not the initial queue 65. Subsequent faults name other addresses and queues, amid repeated resets.
+
+The exported range is page aligned and lies inside the logged 128 MiB shared-memory mapping. `5701632` is a **shared-memory offset**, not a DMA address; it cannot be directly compared with `0x78226a000`. The log contains no table associating that IOVA with a particular imported buffer. A DMA **write** fault also does not prove the faulting operation was a read of the captured frame: rendering destinations, page-table operations and other host allocations must remain in scope.
+
+### Source provenance and the likely Nix package
+
+The log's system path identifies nixpkgs abbreviation `f0f0d1a`. Its [kvmfr derivation](https://github.com/NixOS/nixpkgs/blob/f0f0d1a/pkgs/os-specific/linux/kvmfr/default.nix) uses `looking-glass-client.version` and `.src`, builds the `module` directory against the selected kernel, and adds no source patch list of its own. The [client package at that revision](https://github.com/NixOS/nixpkgs/blob/f0f0d1a/pkgs/by-name/lo/looking-glass-client/package.nix) selects **B7**. Therefore an unoverridden `config.boot.kernelPackages.kvmfr` from that package set is B7 source built for the chosen kernel. Linux version 7.2.8 alone does not establish its source revision; overlays and explicit package overrides remain possible.
+
+Official Looking Glass source was downloaded read-only for inspection:
+
+- B7 tag resolves to `27fe47cbe2a3a8da986d310ab866f0b646ed68f5`.
+- Development master observed as `236efcb155f952f5d7d9fcd5891a3060ad254e68`.
+- Xe mapping comparison uses the existing pinned Linux source `ce1e0223d8ad4211275c82a17ed6d43ab81e13d9`. This is a source comparison baseline, not proof of the exact loaded Xe image on the user's host.
+
+### Exporter mapping and lifetime
+
+In [B7 `module/kvmfr.c`](https://github.com/gnif/LookingGlass/blob/27fe47cbe2a3a8da986d310ab866f0b646ed68f5/module/kvmfr.c), the static device uses `vmalloc_user()` (`:502` onward). A buffer export validates alignment and bounds, obtains the corresponding pages with `vmalloc_to_page()`, and exports a dma-buf (`:188` onward). The logged creation message occurs after `dma_buf_export()` but before returning the dma-buf FD. It is **not a log of successful GPU attachment, IOMMU mapping, or submission**.
+
+`map_kvmfrbuf()` (`:106`) creates a fresh scatter-gather table from those pages and calls:
+
+```c
+dma_map_sg(at->dev, sg->sgl, sg->nents, direction)
+```
+
+The device is the **importing attachment's device**. With Xe importing, mappings are therefore requested for Xe's device, not the kvmfr class device. The callback returns mapped DMA addresses via the normal API; the inspected code does not simply supply unmapped physical page addresses to Xe. `unmap_kvmfrbuf()` uses the same device/direction, unmaps the list, and frees that table. `release_kvmfrbuf()` frees the export's page-pointer array and metadata; it does not free the static backing storage for each exported frame.
+
+B7's client caches dma-buf FDs per frame buffer and invokes `ivshmemGetDMABuf()` when one is needed (`client/src/main.c:783`). Its `useDMA` flag is the conjunction of `app:allowDMA` and shared-memory DMA capability (`:1337`). With DMA disabled, the renderer receives FD `-1` instead (`:796`). The ioctl wrapper rounds buffer size to page size; the export validates the supplied range again. These are source-level ownership observations, not runtime proof that no reset/import race occurred.
+
+#### Scatter-list count discrepancy: real audit finding, unproven explanation
+
+Both B7 and the inspected current master treat `dma_map_sg()`'s return only as success/failure. They do not replace `sg_table.nents` with the returned **mapped** segment count. Linux's [DMA API contract](https://docs.kernel.org/core-api/dma-api.html) permits mapping to merge entries: consumers should use the returned count, while unmapping requires the original input count. Thus an exporter should preserve original versus mapped counts explicitly, normally through the sg-table API or equivalent bookkeeping.
+
+Here `sg->nents` remains the original count, so using it as the unmap argument is **not itself the common wrong-count unmap bug**. The questionable part is returning a table whose `nents` may not describe the mapped segment count. Changing only the map-side field and leaving unmap unchanged would introduce a separate mistake.
+
+Crucially, the inspected Xe PTE paths do not use that field as their loop bound. `xe_pt.c:875` and `xe_ggtt.c:702` call `xe_res_first_sg()`, whose cursor walks mapped addresses and lengths via `sg_dma_len()`/`sg_next()` until the requested byte range is covered (`xe_res_cursor.h:159`, `:214`, `:335`). A smaller mapped count therefore does not, by itself, demonstrate an invalid Xe PTE in this path. No runtime merged counts, map/unmap trace, buffer IOVA list or failing PTE were supplied. Record this as a compatibility/audit concern, **not a proven fix for Code 43 or the DMAR fault**.
+
+### Xe import behavior and limits
+
+[Current inspected Xe `xe_bo.c`](https://github.com/torvalds/linux/blob/ce1e0223d8ad4211275c82a17ed6d43ab81e13d9/drivers/gpu/drm/xe/xe_bo.c#L740) calls `dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL)` and uses the returned mapped SG table. Its comment describes deferred unmapping until a subsequent remap or destruction after idling, relying on reservation-object synchronization (`:737` onward). This requires lifecycle evidence to diagnose; the export log alone cannot show premature unmapping.
+
+A recent upstream import-lifetime fix, [62775525a27c](https://gitlab.freedesktop.org/drm/xe/kernel/-/commit/62775525a27c3b0d56382e08ba81ee2d322058b6), keeps a dma-buf reference across imported-BO creation failure and deferred destruction. Its documented trigger involves failed attach/BO initialization and a reservation-object use-after-free. It is already an ancestor of the inspected `ce1e` baseline. Neither that trigger nor its characteristic CPU fault is established by the supplied log; do not prescribe it as an absent fix solely because it mentions dma-buf.
+
+### Known-report search and next evidence
+
+A bounded search of official Looking Glass GitHub issues for `DMAR` and `dma_map_sg` returned no matches; a combined IOMMU/Xe-driver/page-table search returned four unrelated older reports. The saved query results are in `evidence/adlp-kvmfr/`. This is not evidence that the problem is unknown everywhere. No verified primary report matching this exact Xe + static-kvmfr + PF DMA-write sequence was established in this review.
+
+Record the outcome of the no-client control first, then `app:allowDMA=no`, using fresh runs so prior host-reset damage does not confound the comparison. Compare **the first** DMAR/CAT error and Windows device status, not only later queue timeouts. If DMA-off isolates the failure, the next useful trace is the attachment device, original/mapped segment counts, mapped IOVA ranges, map/unmap timestamps, and first queue ownership. A valid Xe device coredump captured at the first failure could identify the failing VM/BO/PTE. Without those observations, neither Windows-driver changes nor a scatter-count patch has a demonstrated causal target.
