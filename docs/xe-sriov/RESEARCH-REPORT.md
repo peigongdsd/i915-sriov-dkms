@@ -1,12 +1,12 @@
 # Intel SR-IOV research: ADL-P first, then MTL/ARL
 
-Progress report · revision 7 · updated 2026-10-02T20:26:10+08:00
+Progress report · revision 8 · updated 2026-10-02T20:32:17+08:00
 
 This report supports the concrete goal of fixing Linux Xe SR-IOV on **ADL-P first**, then MTL/ARL, with minimal migration of i915 internals. Windows guest-driver analysis is supporting evidence for separating failure causes. Confirmed source facts, published observations, diagnostic hypotheses, and untested proposals are kept distinct. No host driver has been installed, no live GPU configuration has been changed, and no hardware reproduction has been performed in this research session.
 
 ## Current assessment
 
-**Current task: MTL work is paused; the supplied ADL-P Windows Code 43 is the active target.** The new host log and hardware configuration expose a concrete mismatch: Xe owns ADL-P `46a6`, but the boot parameter is `i915.xelp_enable_ccs=1`, which i915 reports ignoring. The supplied Xe modprobe options do not enable its separate default-off CCS option. Current DKMS explicitly recommends `xe.xelp_enable_ccs=1` for affected Windows guests. Verify the effective value, save the existing host Nautilus RCS coredump, then test this one correction on a clean boot with the same Windows driver and GuC. The configuration also sets `kvm_intel nested=0`, making nested-Hyper-V analysis secondary until effective runtime state indicates otherwise. The corrected configuration parses successfully; it was not built or activated. The detailed new case chapter at the end contains the ordered test and capture commands.
+**Current task: MTL work is paused; ADL-P Windows Code 43 persists after the CCS correction.** The user now reports that enabling `xe.xelp_enable_ccs` did not resolve the failure. The incorrect i915-prefixed parameter was real, but correcting it was insufficient. The next evidence is a fresh host collector archive from the failing boot: actual Xe module/CCS state, full kernel log, VF/PF state and any surviving devcoredump. The earlier Nautilus RCS hang remains a prior-boot observation until the new logs establish whether it recurs. The supplied configuration sets `kvm_intel nested=0`; no new evidence establishes a nested Windows hypervisor failure. The collector was uploaded to `codex/Develop/collect-adlp-debug.sh`; remote SHA-256 readback and permanent-link resolution both passed. No further driver change has been inferred from generic Code 43.
 
 **ADL-P already has upstream Xe SR-IOV enablement, but its first failing stage must be identified.** Current upstream includes the platform flag, VF/PF ABI handling, GGTT provisioning, legacy interrupt path, and GuC submission. A VF that times out while recording its default context fails before Mesa starts. That points first to the initial context/GGTT/GuC/reset/interrupt sequence, not to speculative Mesa fixes or a blanket claim that 39-bit DMA is invalid.
 
@@ -60,7 +60,7 @@ The incorrect rebase had placed `Wa_16010904313` in both the indirect context an
 
 This retains the existing workaround applicability gate and Xe's context/buffer lifecycle. It introduces no i915 memory-management code, GGTT relay implementation, new platform-enablement flag or MTL workaround. The clean sync branch is the comparison baseline; the user's historical MTL branches remain separate.
 
-The earlier baseline-versus-backport Linux VF comparison remains useful for validating the Linux context correction. The subsequently supplied Windows failure now has a more immediate discriminator: correct the existing Xe CCS option, holding the driver build, firmware and guest configuration fixed. A Windows user need not first install a Linux guest to run this configuration check. The source correction does not by itself repair Windows' environment classifier or establish that a VF failure before context execution is caused by this workaround.
+The earlier baseline-versus-backport Linux VF comparison remains useful for validating the Linux context correction. The user has now tried the correct Xe CCS option and reports that Windows still fails. A fresh capture of host failure state and the Windows startup status is the next discriminator; no further kernel workaround is justified by Code 43 alone. The source correction does not by itself repair Windows' environment classifier or establish that a VF failure before context execution is caused by this workaround.
 
 ## Work completed and work now underway
 
@@ -513,6 +513,8 @@ The cross-layer implication is useful for the original Xe study: an identical ne
 
 2026-10-02. MTL work is paused at the user's request. This note analyzes the supplied 82-line host log; the assistant has not reproduced this machine's failure. The exact running driver commit, Windows driver version, Windows hypervisor state and complete host log were not supplied with that excerpt.
 
+**Latest user result:** enabling the correct Xe CCS option still leaves Windows with Code 43. The configuration correction alone is therefore insufficient. The ordered CCS test below is retained as the historical experiment, not a recommendation to repeat it. Collect the current failing boot before further parameter or driver changes; the archive will also establish effective CCS state and the loaded module identity. No new host or Windows trace accompanied this result.
+
 ### First actionable finding
 
 The active ADL-P PF driver is **Xe**, but the boot command line contains `i915.xelp_enable_ccs=1`. At 8.725 seconds the log explicitly says i915 ignored that unknown parameter. This cannot enable Xe's independent parameter. Current DKMS defaults `xe.xelp_enable_ccs` to false, and its September 16 change recommends `xe.xelp_enable_ccs=1` for Windows guest problems on Xe_LP, including ADL.
@@ -644,4 +646,4 @@ Current DKMS's ADL runtime-register export already includes `0x9144`. Working i9
 
 ### Status of the earlier patch
 
-The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The immediate experiment is the correct existing Xe CCS option, followed by a separate nested-Hyper-V discriminator if necessary. No additional kernel workaround or MTL change was introduced for this log.
+The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The correct existing Xe CCS option has now been tried without resolving Code 43. The immediate next step is a fresh host capture and the Windows device startup status; a nested-Hyper-V discriminator remains conditional on evidence that Windows actually launches its hypervisor. No additional kernel workaround or MTL change was introduced for this log.

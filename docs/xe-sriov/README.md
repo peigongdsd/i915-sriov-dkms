@@ -2,7 +2,7 @@
 
 The first implementation target is Linux Xe on ADL-P. This branch starts from current DKMS upstream and adds one accepted Xe correction. MTL/ARL work is paused while the supplied ADL-P Windows Code 43 failure is investigated.
 
-**Windows follow-up:** the supplied boot log passes `i915.xelp_enable_ccs=1` while Xe owns the ADL-P PF. Current DKMS has a separate, default-off `xe.xelp_enable_ccs` option and recommends enabling it for affected Windows guests. Read the [case analysis and ordered retest](adlp-windows-code43-triage.md) before adding further patches. The log also contains a host Nautilus RCS hang; preserve its coredump before rebooting.
+**Windows follow-up:** the user reports that correcting `i915.xelp_enable_ccs=1` to the Xe option still leaves Code 43. Preserve a fresh host capture before further changes; the collector includes effective CCS state, complete kernel logs and any matching devcoredump. Read the [case analysis and result](adlp-windows-code43-triage.md). MTL remains paused.
 
 | Branch / change | Identity |
 |---|---|

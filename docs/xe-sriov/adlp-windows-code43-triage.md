@@ -2,6 +2,8 @@
 
 2026-10-02. MTL work is paused at the user's request. This note analyzes the supplied 82-line host log; the assistant has not reproduced this machine's failure. The exact running driver commit, Windows driver version, Windows hypervisor state and complete host log were not supplied with that excerpt.
 
+**Latest user result:** enabling the correct Xe CCS option still leaves Windows with Code 43. The configuration correction alone is therefore insufficient. The ordered CCS test below is retained as the historical experiment, not a recommendation to repeat it. Collect the current failing boot before further parameter or driver changes; the archive will also establish effective CCS state and the loaded module identity. No new host or Windows trace accompanied this result.
+
 ## First actionable finding
 
 The active ADL-P PF driver is **Xe**, but the boot command line contains `i915.xelp_enable_ccs=1`. At 8.725 seconds the log explicitly says i915 ignored that unknown parameter. This cannot enable Xe's independent parameter. Current DKMS defaults `xe.xelp_enable_ccs` to false, and its September 16 change recommends `xe.xelp_enable_ccs=1` for Windows guest problems on Xe_LP, including ADL.
@@ -133,4 +135,4 @@ Current DKMS's ADL runtime-register export already includes `0x9144`. Working i9
 
 ## Status of the earlier patch
 
-The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The immediate experiment is the correct existing Xe CCS option, followed by a separate nested-Hyper-V discriminator if necessary. No additional kernel workaround or MTL change was introduced for this log.
+The branch's accepted timestamp correction remains a legitimate Linux Xe fix. It changes Linux-created contexts; Windows builds its own VF contexts. This new case does not validate that patch as a Windows startup repair. The correct existing Xe CCS option has now been tried without resolving Code 43. The immediate next step is a fresh host capture and the Windows device startup status; a nested-Hyper-V discriminator remains conditional on evidence that Windows actually launches its hypervisor. No additional kernel workaround or MTL change was introduced for this log.
