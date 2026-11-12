@@ -9,12 +9,15 @@
 #include "regs/xe_bars.h"
 #include "xe_assert.h"
 #include "xe_device.h"
+#include "xe_force_wake.h"
+#include "xe_gsc.h"
 #include "xe_gt_sriov_pf_config.h"
 #include "xe_gt_sriov_pf_control.h"
 #include "xe_gt_sriov_printk.h"
 #include "xe_guc_engine_activity.h"
 #include "xe_pci_sriov.h"
 #include "xe_pm.h"
+#include "xe_pxp.h"
 #include "xe_sriov.h"
 #include "xe_sriov_pf.h"
 #include "xe_sriov_pf_control.h"
@@ -22,6 +25,7 @@
 #include "xe_sriov_pf_provision.h"
 #include "xe_sriov_pf_sysfs.h"
 #include "xe_sriov_printk.h"
+#include "xe_uc_fw.h"
 
 static void pf_reset_vfs(struct xe_device *xe, unsigned int num_vfs)
 {
@@ -125,10 +129,45 @@ static void pf_finish_vfs_enabling(struct xe_device *xe)
 	xe_sriov_pf_disarm_guard(xe, &xe->sriov.pf.guard_vfs_enabling, false, NULL);
 }
 
+static int pf_prepare_mtl_gsc(struct xe_device *xe)
+{
+	struct xe_gt *gt = xe_device_get_root_tile(xe)->media_gt;
+
+	if (!gt || !xe_uc_fw_is_loadable(&gt->uc.gsc.fw))
+		return 0;
+
+	/* Finish the async GSC initialization before provisioning any VF. */
+	xe_gsc_wait_for_worker_completion(&gt->uc.gsc);
+
+	CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GSC);
+	if (!xe_force_wake_ref_has_domain(fw_ref.domains, XE_FW_GSC))
+		return -ETIMEDOUT;
+
+	xe_gsc_stop_prepare(&gt->uc.gsc);
+	return 0;
+}
+
+static void pf_resume_mtl_gsc_pxp(struct xe_device *xe)
+{
+	struct xe_gt *gt = xe_device_get_root_tile(xe)->media_gt;
+
+	xe_pxp_pm_resume(xe->pxp);
+
+	if (gt && xe_uc_fw_is_loadable(&gt->uc.gsc.fw)) {
+		CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GSC);
+
+		if (xe_force_wake_ref_has_domain(fw_ref.domains, XE_FW_GSC))
+			xe_gsc_load_start(&gt->uc.gsc);
+		else
+			xe_sriov_notice(xe, "Failed to acquire GSC forcewake on VF teardown\n");
+	}
+}
+
 static int pf_enable_vfs(struct xe_device *xe, int num_vfs)
 {
 	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
 	int total_vfs = xe_sriov_pf_get_totalvfs(xe);
+	bool mtl = xe->info.platform == XE_METEORLAKE;
 	int err;
 
 	xe_assert(xe, IS_SRIOV_PF(xe));
@@ -155,6 +194,19 @@ static int pf_enable_vfs(struct xe_device *xe, int num_vfs)
 	 */
 	xe_pm_runtime_get_noresume(xe);
 
+	if (mtl) {
+		xe_sriov_info(xe, "Preparing GSC/PXP before VF provisioning\n");
+		err = pf_prepare_mtl_gsc(xe);
+		if (err)
+			goto put_pm;
+
+		err = xe_pxp_pm_suspend(xe->pxp);
+		if (err)
+			goto resume_gsc_pxp;
+
+		xe_sriov_info(xe, "GSC/PXP prepared for VF provisioning\n");
+	}
+
 	err = xe_sriov_pf_provision_vfs(xe, num_vfs);
 	if (err < 0)
 		goto failed;
@@ -179,6 +231,10 @@ static int pf_enable_vfs(struct xe_device *xe, int num_vfs)
 failed:
 	pf_resize_vf_vram_bar(xe, xe->sriov.pf.device_total_vfs);
 	xe_sriov_pf_unprovision_vfs(xe, num_vfs);
+resume_gsc_pxp:
+	if (mtl)
+		pf_resume_mtl_gsc_pxp(xe);
+put_pm:
 	xe_pm_runtime_put(xe);
 	pf_finish_vfs_enabling(xe);
 out:
@@ -212,6 +268,9 @@ static int pf_disable_vfs(struct xe_device *xe)
 	pf_reset_vfs(xe, num_vfs);
 
 	xe_sriov_pf_unprovision_vfs(xe, num_vfs);
+
+	if (xe->info.platform == XE_METEORLAKE)
+		pf_resume_mtl_gsc_pxp(xe);
 
 	/* not needed anymore - see pf_enable_vfs() */
 	xe_pm_runtime_put(xe);
