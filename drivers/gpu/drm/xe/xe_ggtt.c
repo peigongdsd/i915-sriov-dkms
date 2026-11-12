@@ -18,9 +18,11 @@
 #include "abi/guc_relay_actions_abi.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_gtt_defs.h"
+#include "regs/xe_guc_regs.h"
 #include "regs/xe_regs.h"
 #include "xe_assert.h"
 #include "xe_bo.h"
+#include "xe_force_wake.h"
 #include "xe_gt_printk.h"
 #include "xe_gt_types.h"
 #include "xe_map.h"
@@ -584,12 +586,23 @@ err:
 	return err;
 }
 
-static void ggtt_invalidate_gt_tlb(struct xe_gt *gt)
+static void ggtt_invalidate_gt_tlb(struct xe_gt *gt, bool use_mmio)
 {
 	int err;
 
 	if (!gt)
 		return;
+
+	if (use_mmio) {
+		CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GT);
+
+		if (xe_gt_WARN(gt, !xe_force_wake_ref_has_domain(fw_ref.domains, XE_FW_GT),
+			       "Failed to acquire forcewake for GGTT invalidation"))
+			return;
+
+		xe_mmio_write32(&gt->mmio, GUC_TLB_INV_CR, GUC_TLB_INV_CR_INVALIDATE);
+		return;
+	}
 
 	err = xe_tlb_inval_ggtt(&gt->tlb_inval);
 	xe_gt_WARN(gt, err, "Failed to invalidate GGTT (%pe)", ERR_PTR(err));
@@ -610,11 +623,19 @@ static void xe_ggtt_flush_writes(struct xe_ggtt *ggtt)
 
 static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 {
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+	bool use_mmio = IS_SRIOV_PF(xe) && xe->info.platform == XE_METEORLAKE &&
+			MEDIA_VERx100(xe) == 1300;
+
 	xe_ggtt_flush_writes(ggtt);
 
+	/* Match the working MTL PF path when assigning VF GGTT ownership. */
+	if (use_mmio)
+		drm_info_once(&xe->drm, "Using MMIO GGTT invalidation on MTL SR-IOV PF\n");
+
 	/* Each GT in a tile has its own TLB to cache GGTT lookups */
-	ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt);
-	ggtt_invalidate_gt_tlb(ggtt->tile->media_gt);
+	ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt, use_mmio);
+	ggtt_invalidate_gt_tlb(ggtt->tile->media_gt, use_mmio);
 }
 
 /**
