@@ -20,11 +20,13 @@
 #include "xe_device_types.h"
 #include "xe_gt_sriov_printk.h"
 #include "xe_gt_sriov_pf_service.h"
+#include "xe_gt_sriov_pf_service_types.h"
 #include "xe_guc.h"
 #include "xe_guc_ct.h"
 #include "xe_guc_hxg_helpers.h"
 #include "xe_guc_relay.h"
 #include "xe_guc_relay_types.h"
+#include "xe_pm.h"
 #include "xe_sriov.h"
 
 /*
@@ -126,6 +128,12 @@ struct relay_transaction {
 	 *            represents outgoing request to the remote VF/PF.
 	 */
 	bool incoming;
+
+	/** @ggtt_update: incoming MTL/ARL GGTT request. */
+	bool ggtt_update;
+
+	/** @ggtt_token: VF and CT state when the GGTT request was received. */
+	struct xe_gt_sriov_pf_ggtt_token ggtt_token;
 
 	/**
 	 * @remote: PF/VF identifier of the origin (or target) of the relay
@@ -239,6 +247,7 @@ __relay_get_transaction(struct xe_guc_relay *relay, bool incoming, u32 remote, u
 		return ERR_PTR(-ENOMEM);
 
 	txn->incoming = incoming;
+	txn->ggtt_update = false;
 	txn->remote = remote;
 	txn->rid = rid;
 	txn->offset = remote ?
@@ -304,7 +313,20 @@ static int relay_send_transaction(struct xe_guc_relay *relay, struct relay_trans
 		    guc_hxg_type_to_string(FIELD_GET(GUC_HXG_MSG_0_TYPE, msg[0])),
 		    txn->rid, txn->remote, (int)sizeof(u32) * len, msg);
 
-	ret = xe_guc_ct_send_block(relay_to_ct(relay), buf, len + txn->offset);
+	if (txn->ggtt_update) {
+		if (!xe_gt_sriov_pf_service_ggtt_current(relay_to_gt(relay), txn->remote,
+							 &txn->ggtt_token))
+			return -ECANCELED;
+
+		guard(xe_pm_runtime)(relay_to_xe(relay));
+		ret = xe_guc_ct_send_ggtt_reply(relay_to_ct(relay), buf, len + txn->offset,
+						txn->remote, &txn->ggtt_token);
+	} else {
+		ret = xe_guc_ct_send_block(relay_to_ct(relay), buf, len + txn->offset);
+	}
+
+	if (txn->ggtt_update && ret == -ECANCELED)
+		return ret;
 
 	if (unlikely(ret > 0)) {
 		relay_notice(relay, "Unexpected data=%d from GuC, wrong ABI?\n", ret);
@@ -677,7 +699,8 @@ static int relay_testloop_action_handler(struct xe_guc_relay *relay, u32 origin,
 }
 
 static int relay_action_handler(struct xe_guc_relay *relay, u32 origin,
-				const u32 *msg, u32 len, u32 *response, u32 size)
+				const u32 *msg, u32 len, u32 *response, u32 size,
+				const struct xe_gt_sriov_pf_ggtt_token *token)
 {
 	struct xe_gt *gt = relay_to_gt(relay);
 	u32 type;
@@ -694,7 +717,7 @@ static int relay_action_handler(struct xe_guc_relay *relay, u32 origin,
 	if (IS_SRIOV_PF(relay_to_xe(relay))) {
 		if (type == GUC_HXG_TYPE_REQUEST)
 			ret = xe_gt_sriov_pf_service_process_request(gt, origin, msg, len,
-								     response, size);
+								     response, size, token);
 		else
 			ret = -EOPNOTSUPP;
 	} else {
@@ -735,7 +758,8 @@ static void relay_process_incoming_action(struct xe_guc_relay *relay)
 	ret = relay_action_handler(relay, txn->remote,
 				   txn->request_buf + txn->offset, txn->request_len,
 				   txn->response_buf + txn->offset,
-				   ARRAY_SIZE(txn->response_buf) - txn->offset);
+				   ARRAY_SIZE(txn->response_buf) - txn->offset,
+				   txn->ggtt_update ? &txn->ggtt_token : NULL);
 
 	if (ret == -EINPROGRESS) {
 		again = true;
@@ -746,6 +770,9 @@ static void relay_process_incoming_action(struct xe_guc_relay *relay)
 		txn->response_len = ret;
 		ret = relay_send_transaction(relay, txn);
 	}
+
+	if (txn->ggtt_update && ret == -ECANCELED)
+		goto out;
 
 	if (ret < 0) {
 		u32 error = to_relay_error(ret);
@@ -775,6 +802,7 @@ static void relay_process_incoming_action(struct xe_guc_relay *relay)
 			     txn->rid, ERR_PTR(ret), 4 * txn->request_len,
 			     txn->request_buf + txn->offset);
 
+out:
 	relay_release_transaction(relay, txn);
 }
 
@@ -814,6 +842,18 @@ static int relay_queue_action_msg(struct xe_guc_relay *relay, u32 origin, u32 ri
 	txn = relay_new_incoming_transaction(relay, origin, rid, msg, len);
 	if (IS_ERR(txn))
 		return PTR_ERR(txn);
+
+	if (origin && FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, msg[0]) ==
+	    GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32 &&
+	    xe_gt_sriov_pf_service_has_ggtt_relay(relay_to_gt(relay))) {
+		struct xe_gt *gt = relay_to_gt(relay);
+
+		txn->ggtt_update = true;
+		if (!xe_gt_sriov_pf_service_ggtt_snapshot(gt, origin, &txn->ggtt_token)) {
+			relay_release_transaction(relay, txn);
+			return 0;
+		}
+	}
 
 	spin_lock(&relay->lock);
 	list_add_tail(&txn->link, &relay->incoming_actions);

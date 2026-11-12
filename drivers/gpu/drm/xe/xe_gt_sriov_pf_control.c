@@ -13,6 +13,7 @@
 #include "xe_gt_sriov_pf_config.h"
 #include "xe_gt_sriov_pf_control.h"
 #include "xe_gt_sriov_pf_helpers.h"
+#include "xe_gt_sriov_pf_service.h"
 #include "xe_gt_sriov_pf_migration.h"
 #include "xe_gt_sriov_pf_monitor.h"
 #include "xe_gt_sriov_printk.h"
@@ -1553,11 +1554,17 @@ static bool pf_exit_vf_flr_prepare(struct xe_gt *gt, unsigned int vfid)
 	return true;
 }
 
+bool xe_gt_sriov_pf_control_flr_in_progress(struct xe_gt *gt, u32 vfid)
+{
+	return pf_check_vf_state(gt, vfid, XE_GT_SRIOV_STATE_FLR_WIP);
+}
+
 static bool pf_enter_vf_flr_wip(struct xe_gt *gt, unsigned int vfid)
 {
 	if (!pf_enter_vf_state(gt, vfid, XE_GT_SRIOV_STATE_FLR_WIP))
 		return false;
 
+	xe_gt_sriov_pf_service_reset_ggtt(gt, vfid);
 	pf_enter_vf_wip(gt, vfid);
 	return true;
 }

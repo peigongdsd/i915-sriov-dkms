@@ -97,6 +97,7 @@ static void pf_fini_action(void *arg)
 {
 	struct xe_gt *gt = arg;
 
+	xe_gt_sriov_pf_service_fini_ggtt(gt);
 	pf_fini_workers(gt);
 }
 

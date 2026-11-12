@@ -301,6 +301,18 @@ int xe_tlb_inval_all(struct xe_tlb_inval *tlb_inval,
 	return xe_tlb_inval_issue(tlb_inval, fence, tlb_inval->ops->all);
 }
 
+static int tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval, bool report_fence_error)
+{
+	struct xe_tlb_inval_fence fence;
+	int ret;
+
+	xe_tlb_inval_fence_init(tlb_inval, &fence, true);
+	ret = xe_tlb_inval_issue(tlb_inval, &fence, tlb_inval->ops->ggtt);
+	xe_tlb_inval_fence_wait(&fence);
+
+	return ret ?: (report_fence_error ? READ_ONCE(fence.base.error) : 0);
+}
+
 /**
  * xe_tlb_inval_ggtt() - Issue a TLB invalidation for the GGTT
  * @tlb_inval: TLB invalidation client
@@ -312,14 +324,13 @@ int xe_tlb_inval_all(struct xe_tlb_inval *tlb_inval,
  */
 int xe_tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval)
 {
-	struct xe_tlb_inval_fence fence, *fence_ptr = &fence;
-	int ret;
+	return tlb_inval_ggtt(tlb_inval, false);
+}
 
-	xe_tlb_inval_fence_init(tlb_inval, fence_ptr, true);
-	ret = xe_tlb_inval_issue(tlb_inval, fence_ptr, tlb_inval->ops->ggtt);
-	xe_tlb_inval_fence_wait(fence_ptr);
-
-	return ret;
+/* PF relay callers need to report invalidation completion errors to the VF. */
+int xe_tlb_inval_ggtt_sync(struct xe_tlb_inval *tlb_inval)
+{
+	return tlb_inval_ggtt(tlb_inval, true);
 }
 
 /**

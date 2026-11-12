@@ -560,6 +560,8 @@ static void guc_ct_change_state(struct xe_guc_ct *ct,
 	 * WRITE_ONCE pairs with READ_ONCEs in xe_guc_ct_initialized and
 	 * xe_guc_ct_enabled.
 	 */
+	if (state != XE_GUC_CT_STATE_ENABLED)
+		xe_gt_sriov_pf_service_stop_ggtt_ct(gt);
 	WRITE_ONCE(ct->state, state);
 
 	xe_gt_dbg(gt, "GuC CT communication channel %s\n",
@@ -1195,9 +1197,10 @@ static bool guc_ct_send_wait_for_retry(struct xe_guc_ct *ct, u32 len,
 	return true;
 }
 
-static int guc_ct_send_locked(struct xe_guc_ct *ct, const u32 *action, u32 len,
-			      u32 g2h_len, u32 num_g2h,
-			      struct g2h_fence *g2h_fence)
+static int guc_ct_send_retry_locked(struct xe_guc_ct *ct, const u32 *action, u32 len,
+				    u32 g2h_len, u32 num_g2h,
+				    struct g2h_fence *g2h_fence, u32 vfid,
+				    const struct xe_gt_sriov_pf_ggtt_token *token)
 {
 	struct xe_gt *gt = ct_to_gt(ct);
 	unsigned int sleep_period_ms = 1;
@@ -1209,6 +1212,9 @@ static int guc_ct_send_locked(struct xe_guc_ct *ct, const u32 *action, u32 len,
 	xe_device_assert_mem_access(ct_to_xe(ct));
 
 try_again:
+	if (token && !xe_gt_sriov_pf_service_ggtt_current(gt, vfid, token))
+		return -ECANCELED;
+
 	ret = __guc_ct_send_locked(ct, action, len, g2h_len, num_g2h,
 				   g2h_fence);
 
@@ -1226,6 +1232,12 @@ broken:
 	CT_DEAD(ct, &ct->ctbs.h2g, DEADLOCK);
 
 	return -EDEADLK;
+}
+
+static int guc_ct_send_locked(struct xe_guc_ct *ct, const u32 *action, u32 len,
+			      u32 g2h_len, u32 num_g2h, struct g2h_fence *g2h_fence)
+{
+	return guc_ct_send_retry_locked(ct, action, len, g2h_len, num_g2h, g2h_fence, 0, NULL);
 }
 
 static int guc_ct_send(struct xe_guc_ct *ct, const u32 *action, u32 len,
@@ -1332,7 +1344,8 @@ static bool retry_failure(struct xe_guc_ct *ct, int ret)
 #define GUC_SEND_RETRY_MSLEEP	5
 
 static int guc_ct_send_recv(struct xe_guc_ct *ct, const u32 *action, u32 len,
-			    u32 *response_buffer, bool no_fail)
+			    u32 *response_buffer, bool no_fail, u32 vfid,
+			    const struct xe_gt_sriov_pf_ggtt_token *token)
 {
 	struct xe_gt *gt = ct_to_gt(ct);
 	struct g2h_fence g2h_fence;
@@ -1350,7 +1363,13 @@ static int guc_ct_send_recv(struct xe_guc_ct *ct, const u32 *action, u32 len,
 retry:
 	g2h_fence_init(&g2h_fence, response_buffer);
 retry_same_fence:
-	ret = guc_ct_send(ct, action, len, 0, 0, &g2h_fence);
+	if (token) {
+		guard(mutex)(&ct->lock);
+
+		ret = guc_ct_send_retry_locked(ct, action, len, 0, 0, &g2h_fence, vfid, token);
+	} else {
+		ret = guc_ct_send(ct, action, len, 0, 0, &g2h_fence);
+	}
 	if (unlikely(ret == -ENOMEM)) {
 		/* Retry allocation /w GFP_KERNEL */
 		ret = xa_err(xa_store(&ct->fence_lookup, g2h_fence.seqno,
@@ -1463,14 +1482,20 @@ int xe_guc_ct_send_recv(struct xe_guc_ct *ct, const u32 *action, u32 len,
 			u32 *response_buffer)
 {
 	KUNIT_STATIC_STUB_REDIRECT(xe_guc_ct_send_recv, ct, action, len, response_buffer);
-	return guc_ct_send_recv(ct, action, len, response_buffer, false);
+	return guc_ct_send_recv(ct, action, len, response_buffer, false, 0, NULL);
 }
 ALLOW_ERROR_INJECTION(xe_guc_ct_send_recv, ERRNO);
 
 int xe_guc_ct_send_recv_no_fail(struct xe_guc_ct *ct, const u32 *action,
 				u32 len, u32 *response_buffer)
 {
-	return guc_ct_send_recv(ct, action, len, response_buffer, true);
+	return guc_ct_send_recv(ct, action, len, response_buffer, true, 0, NULL);
+}
+
+int xe_guc_ct_send_ggtt_reply(struct xe_guc_ct *ct, const u32 *action, u32 len, u32 vfid,
+			      const struct xe_gt_sriov_pf_ggtt_token *token)
+{
+	return guc_ct_send_recv(ct, action, len, NULL, false, vfid, token);
 }
 
 static u32 *msg_to_hxg(u32 *msg)

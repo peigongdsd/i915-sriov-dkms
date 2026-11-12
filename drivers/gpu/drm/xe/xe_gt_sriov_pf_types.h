@@ -31,6 +31,12 @@ struct xe_gt_sriov_metadata {
 	/** @version: negotiated VF/PF ABI version */
 	struct xe_gt_sriov_pf_service_version version;
 
+	/** @ggtt_generation: invalidates stale VF updates on the primary GT. */
+	atomic_t ggtt_generation;
+
+	/** @mmio_ggtt: pending update from the legacy GuC MMIO relay. */
+	struct xe_gt_sriov_pf_mmio_ggtt mmio_ggtt;
+
 	/** @migration: per-VF migration data. */
 	struct xe_gt_sriov_migration_data migration;
 };

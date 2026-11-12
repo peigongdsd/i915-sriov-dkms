@@ -174,6 +174,19 @@
 #define VF2PF_QUERY_RUNTIME_RESPONSE_DATAn_REG_OFFSETx	GUC_HXG_RESPONSE_MSG_n_DATAn
 #define VF2PF_QUERY_RUNTIME_RESPONSE_DATAn_REG_VALUEx	GUC_HXG_RESPONSE_MSG_n_DATAn
 
+/*
+ * MTL/ARL legacy VF GGTT update. The MMIO request carries one PTE; the
+ * CTB request carries one or more low/high DWORD pairs. Both use the
+ * same descriptor: a VF-relative page offset, copy mode and copy count.
+ */
+#define GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32		0x0102u
+#define VF2PF_UPDATE_GGTT32_OFFSET			GENMASK(31, 12)
+#define VF2PF_UPDATE_GGTT32_MODE			GENMASK(11, 10)
+#define   VF2PF_UPDATE_GGTT32_REPLICATE			BIT(0)
+#define   VF2PF_UPDATE_GGTT32_LAST			BIT(1)
+#define VF2PF_UPDATE_GGTT32_COPIES			GENMASK(9, 0)
+#define VF2PF_UPDATE_GGTT32_MAX_PTES			((GUC_RELAY_MSG_MAX_LEN - 2) / 2)
+
 /**
  * DOC: GuC Relay Debug Actions
  *

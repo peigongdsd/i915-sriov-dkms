@@ -10,6 +10,7 @@
 
 struct drm_printer;
 struct xe_device;
+struct xe_gt_sriov_pf_ggtt_token;
 
 int xe_guc_ct_init_noalloc(struct xe_guc_ct *ct);
 int xe_guc_ct_init(struct xe_guc_ct *ct);
@@ -62,6 +63,9 @@ xe_guc_ct_send_block(struct xe_guc_ct *ct, const u32 *action, u32 len)
 {
 	return xe_guc_ct_send_recv(ct, action, len, NULL);
 }
+
+int xe_guc_ct_send_ggtt_reply(struct xe_guc_ct *ct, const u32 *action, u32 len, u32 vfid,
+			      const struct xe_gt_sriov_pf_ggtt_token *token);
 
 /* This is only version of the send CT you can call from a G2H handler */
 int xe_guc_ct_send_g2h_handler(struct xe_guc_ct *ct, const u32 *action,
