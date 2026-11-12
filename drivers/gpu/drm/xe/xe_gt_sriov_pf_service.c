@@ -8,6 +8,7 @@
 #include "abi/guc_actions_sriov_abi.h"
 #include "abi/guc_relay_actions_abi.h"
 
+#include "regs/xe_gsc_regs.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_guc_regs.h"
 
@@ -61,6 +62,8 @@ static const struct xe_reg pvc_runtime_regs[] = {
 	TIMESTAMP_OVERRIDE,		/* _MMIO(0x44074), for legacy i915 interop */
 };
 
+#define MTL_EARLY_RUNTIME_REGS 3
+
 static const struct xe_reg ver_1270_runtime_regs[] = {
 	RPM_CONFIG0,			/* _MMIO(0x0d00) */
 	XEHP_FUSE4,			/* _MMIO(0x9114) */
@@ -74,6 +77,10 @@ static const struct xe_reg ver_1270_runtime_regs[] = {
 	CTC_MODE,			/* _MMIO(0xa26c), for legacy i915 interop */
 	HUC_KERNEL_LOAD_INFO,		/* _MMIO(0xc1dc) */
 	TIMESTAMP_OVERRIDE,		/* _MMIO(0x44074), for legacy i915 interop */
+	/* Legacy MTL/ARL VFs query these offsets on the primary GT. */
+	XE_REG(0x10100c),
+	HECI_FWSTS5(MTL_GSC_HECI1_BASE),
+	MTL_GT_ACTIVITY_FACTOR,
 };
 
 static const struct xe_reg ver_2000_runtime_regs[] = {
@@ -127,8 +134,9 @@ static const struct xe_reg ver_35_runtime_regs[] = {
 	SERVICE_COPY_ENABLE,		/* _MMIO(0x9170) */
 };
 
-static const struct xe_reg *pick_runtime_regs(struct xe_device *xe, unsigned int *count)
+static const struct xe_reg *pick_runtime_regs(struct xe_gt *gt, unsigned int *count)
 {
+	struct xe_device *xe = gt_to_xe(gt);
 	const struct xe_reg *regs;
 
 	if (GRAPHICS_VER(xe) >= 35) {
@@ -142,6 +150,8 @@ static const struct xe_reg *pick_runtime_regs(struct xe_device *xe, unsigned int
 		regs = ver_2000_runtime_regs;
 	} else if (GRAPHICS_VERx100(xe) >= 1270) {
 		*count = ARRAY_SIZE(ver_1270_runtime_regs);
+		if (xe->info.platform != XE_METEORLAKE || gt != gt->tile->primary_gt)
+			*count -= MTL_EARLY_RUNTIME_REGS;
 		regs = ver_1270_runtime_regs;
 	} else if (GRAPHICS_VERx100(xe) == 1260) {
 		*count = ARRAY_SIZE(pvc_runtime_regs);
@@ -172,7 +182,7 @@ static int pf_alloc_runtime_info(struct xe_gt *gt)
 	xe_gt_assert(gt, !gt->sriov.pf.service.runtime.regs);
 	xe_gt_assert(gt, !gt->sriov.pf.service.runtime.values);
 
-	regs = pick_runtime_regs(xe, &size);
+	regs = pick_runtime_regs(gt, &size);
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
@@ -449,7 +459,7 @@ static int pf_lookup_runtime_reg_val(struct xe_gt *gt, u32 offset, u32 *val)
 
 	for (i = 0; i < runtime->size; i++) {
 		if (xe_mmio_adjusted_addr(&gt->mmio, runtime->regs[i].addr) == offset) {
-			*val = runtime->values[i];
+			*val = READ_ONCE(runtime->values[i]);
 			return 0;
 		}
 	}
@@ -536,6 +546,13 @@ static int pf_reply_mmio_relay_get_runtime(struct xe_gt *gt, u32 vfid, u32 magic
 			continue;
 
 		ret = pf_lookup_runtime_reg_val(gt, offset, &val);
+		if (ret && gt_to_xe(gt)->info.platform == XE_METEORLAKE) {
+			struct xe_gt *other = gt == gt->tile->primary_gt ?
+				gt->tile->media_gt : gt->tile->primary_gt;
+
+			if (other)
+				ret = pf_lookup_runtime_reg_val(other, offset, &val);
+		}
 		if (ret < 0) {
 			xe_gt_sriov_notice(gt, "VF%u queried disallowed MMIO runtime reg %#x\n",
 					   vfid, offset);

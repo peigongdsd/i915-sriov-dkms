@@ -17,6 +17,8 @@
 #define MEDIA_GT_GSI_LENGTH				0x40000
 
 /* MTL workpoint reg to get core C state and actual freq of 3D, SAMedia */
+#define MTL_GT_ACTIVITY_FACTOR			XE_REG(0x138010)
+
 #define MTL_MIRROR_TARGET_WP1				XE_REG(0xc60)
 #define   MTL_CAGF_MASK					REG_GENMASK(8, 0)
 #define   MTL_CC_MASK					REG_GENMASK(12, 9)
