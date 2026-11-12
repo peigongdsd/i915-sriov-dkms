@@ -19,6 +19,7 @@
 #include "xe_gt_sriov_pf_config.h"
 #include "xe_gt_sriov_pf_helpers.h"
 #include "xe_gt_sriov_pf_policy.h"
+#include "xe_gt_sriov_pf_service.h"
 #include "xe_gt_sriov_printk.h"
 #include "xe_guc.h"
 #include "xe_guc_buf.h"
@@ -494,10 +495,13 @@ static int pf_distribute_config_ggtt(struct xe_tile *tile, unsigned int vfid, u6
 	return err ?: err2;
 }
 
-static void pf_release_vf_config_ggtt(struct xe_gt *gt, struct xe_gt_sriov_config *config)
+static void pf_release_vf_config_ggtt(struct xe_gt *gt, u32 vfid)
 {
+	struct xe_gt_sriov_config *config = pf_pick_vf_config(gt, vfid);
+
 	xe_ggtt_node_remove(config->ggtt_region, false);
 	config->ggtt_region = NULL;
+	xe_gt_sriov_pf_service_reset_ggtt(gt, vfid);
 }
 
 static int pf_provision_vf_ggtt(struct xe_gt *gt, unsigned int vfid, u64 size)
@@ -520,7 +524,7 @@ static int pf_provision_vf_ggtt(struct xe_gt *gt, unsigned int vfid, u64 size)
 		if (unlikely(err))
 			return err;
 
-		pf_release_vf_config_ggtt(gt, config);
+		pf_release_vf_config_ggtt(gt, vfid);
 
 		err = pf_refresh_vf_cfg(gt, vfid);
 		if (unlikely(err))
@@ -544,6 +548,7 @@ static int pf_provision_vf_ggtt(struct xe_gt *gt, unsigned int vfid, u64 size)
 		goto err;
 
 	config->ggtt_region = node;
+	xe_gt_sriov_pf_service_reset_ggtt(gt, vfid);
 	return 0;
 err:
 	xe_ggtt_node_remove(node, false);
@@ -2849,7 +2854,7 @@ static void pf_release_vf_config(struct xe_gt *gt, unsigned int vfid)
 	bool released;
 
 	if (xe_gt_is_main_type(gt)) {
-		pf_release_vf_config_ggtt(gt, config);
+		pf_release_vf_config_ggtt(gt, vfid);
 		if (IS_DGFX(xe)) {
 			released = pf_release_vf_config_lmem(gt, config);
 			if (released && xe_device_has_lmtt(xe))
