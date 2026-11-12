@@ -17,6 +17,7 @@
 #include "xe_platform_types.h"
 #include "xe_reg_sr.h"
 #include "xe_rtp.h"
+#include "xe_sriov.h"
 #include "xe_step.h"
 
 #undef XE_REG_MCR
@@ -43,7 +44,21 @@ static bool match_multi_queue_class(const struct xe_device *xe,
 	return xe_gt_supports_multi_queue(gt, hwe->class);
 }
 
+static bool match_sriov_pf(const struct xe_device *xe,
+			   const struct xe_gt *gt,
+			   const struct xe_hw_engine *hwe)
+{
+	return IS_SRIOV_PF(xe);
+}
+
 VISIBLE_IF_KUNIT const struct xe_rtp_table_sr register_whitelist = XE_RTP_TABLE_SR(
+	{ XE_RTP_NAME("mtl_sriov_rcc_keying"),
+	  XE_RTP_RULES(PLATFORM(METEORLAKE), GRAPHICS_VERSION_RANGE(1270, 1274),
+		       ENGINE_CLASS(RENDER), FUNC(match_sriov_pf)),
+	  /* Let the VF UMD select BTP+BTI render color cache keying. */
+	  XE_RTP_ACTIONS(WHITELIST(XEHP_COMMON_SLICE_CHICKEN3,
+				   RING_FORCE_TO_NONPRIV_ACCESS_RW))
+	},
 	{ XE_RTP_NAME("WaAllowPMDepthAndInvocationCountAccessFromUMD, 1408556865"),
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1210), ENGINE_CLASS(RENDER)),
 	  XE_RTP_ACTIONS(WHITELIST(PS_INVOCATION_COUNT,
