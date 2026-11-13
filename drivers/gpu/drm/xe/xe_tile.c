@@ -15,8 +15,10 @@
 #include "xe_migrate.h"
 #include "xe_pcode.h"
 #include "xe_sa.h"
+#include "xe_sriov.h"
 #include "xe_svm.h"
 #include "xe_tile.h"
+#include "xe_tile_printk.h"
 #include "xe_tile_sysfs.h"
 #include "xe_ttm_vram_mgr.h"
 #include "xe_vram.h"
@@ -205,7 +207,11 @@ int xe_tile_init(struct xe_tile *tile)
 {
 	int err;
 
+	if (IS_SRIOV_VF(tile_to_xe(tile)))
+		xe_tile_info(tile, "VFPROBE: before memirq initialization\n");
 	err = xe_memirq_init(&tile->memirq);
+	if (IS_SRIOV_VF(tile_to_xe(tile)))
+		xe_tile_info(tile, "VFPROBE: memirq initialization returned %d\n", err);
 	if (err)
 		return err;
 

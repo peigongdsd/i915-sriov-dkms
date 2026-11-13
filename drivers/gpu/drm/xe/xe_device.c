@@ -69,6 +69,7 @@
 #include "xe_svm.h"
 #include "xe_sysctrl.h"
 #include "xe_tile.h"
+#include "xe_tile_printk.h"
 #include "xe_ttm_stolen_mgr.h"
 #include "xe_ttm_sys_mgr.h"
 #include "xe_vm.h"
@@ -1015,6 +1016,8 @@ int xe_device_probe(struct xe_device *xe)
 		err = xe_ggtt_init_early(tile->mem.ggtt);
 		if (err)
 			return err;
+		if (IS_SRIOV_VF(xe))
+			xe_tile_info(tile, "VFPROBE: early GGTT setup completed\n");
 	}
 
 	/*

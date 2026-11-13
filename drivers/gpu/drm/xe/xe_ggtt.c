@@ -8,6 +8,7 @@
 #include <kunit/visibility.h>
 #include <linux/fault-inject.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/printk.h>
 #include <linux/sizes.h>
 
 #include <drm/drm_drv.h>
@@ -422,14 +423,6 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 		}
 	}
 
-	/* Diagnostic only: stop after VF discovery, before GGTT initialization. */
-	if (IS_SRIOV_VF(xe) && xe->info.platform == XE_METEORLAKE) {
-		drm_err(&xe->drm,
-			"VFPROBE: stop before GGTT setup, base=%#llx size=%#llx\n",
-			ggtt_start, ggtt_size);
-		return -EOPNOTSUPP;
-	}
-
 	ggtt->gsm = ggtt->tile->mmio.regs + SZ_8M;
 
 	/* Match i915 on the MTL/ARL PF when firmware permits direct GSM access. */
@@ -788,6 +781,21 @@ void xe_ggtt_map_bo_unlocked(struct xe_ggtt *ggtt, struct xe_bo *bo)
 	mutex_unlock(&ggtt->lock);
 }
 
+/* Diagnostic only; keep a stable breakpoint before either BO insertion path. */
+static noinline bool xe_ggtt_vf_probe_stop(struct xe_ggtt *ggtt, struct xe_bo *bo)
+{
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+
+	if (!IS_SRIOV_VF(xe) || xe->info.platform != XE_METEORLAKE)
+		return false;
+
+	xe_tile_err(ggtt->tile,
+		    "VFPROBE: stop before GGTT BO insertion, size=%zu flags=%#x base=%#llx range=%#llx\n",
+		    xe_bo_size(bo), bo->flags, ggtt->start, ggtt->size);
+	dump_stack();
+	return true;
+}
+
 /**
  * xe_ggtt_insert_node_transform - Insert a newly allocated &xe_ggtt_node into the GGTT
  * @ggtt: the &xe_ggtt where the node will inserted/reserved.
@@ -810,6 +818,9 @@ struct xe_ggtt_node *xe_ggtt_insert_node_transform(struct xe_ggtt *ggtt,
 {
 	struct xe_ggtt_node *node;
 	int ret;
+
+	if (xe_ggtt_vf_probe_stop(ggtt, bo))
+		return ERR_PTR(-EOPNOTSUPP);
 
 	node = ggtt_node_init(ggtt);
 	if (IS_ERR(node))
@@ -845,6 +856,9 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 	u64 alignment = bo->min_align > 0 ? bo->min_align : XE_PAGE_SIZE;
 	u8 tile_id = ggtt->tile->id;
 	int err;
+
+	if (xe_ggtt_vf_probe_stop(ggtt, bo))
+		return -EOPNOTSUPP;
 
 	if (xe_bo_is_vram(bo) && ggtt->flags & XE_GGTT_FLAGS_64K)
 		alignment = SZ_64K;
