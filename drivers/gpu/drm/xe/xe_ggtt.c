@@ -17,9 +17,11 @@
 
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_gtt_defs.h"
+#include "regs/xe_guc_regs.h"
 #include "regs/xe_regs.h"
 #include "xe_assert.h"
 #include "xe_bo.h"
+#include "xe_force_wake.h"
 #include "xe_gt_printk.h"
 #include "xe_gt_types.h"
 #include "xe_map.h"
@@ -392,7 +394,7 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 {
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
 	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
-	unsigned int gsm_size;
+	unsigned int gsm_size = 0;
 	u64 ggtt_start, wopcm = xe_wopcm_size(xe), ggtt_size, top = GUC_GGTT_TOP;
 	int err;
 
@@ -420,6 +422,33 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 	}
 
 	ggtt->gsm = ggtt->tile->mmio.regs + SZ_8M;
+
+	/* Match i915 on the MTL/ARL PF when firmware permits direct GSM access. */
+	if (xe->info.platform == XE_METEORLAKE && IS_SRIOV_PF(xe)) {
+		phys_addr_t base;
+		u32 permission;
+
+		if (ggtt->tile != xe_device_get_root_tile(xe)) {
+			xe_tile_err(ggtt->tile,
+				    "MTL SR-IOV GSM access requires the root tile\n");
+			return -EOPNOTSUPP;
+		}
+		permission = xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS);
+		if (permission != STOLEN_ACCESS_ALLOWED) {
+			xe_tile_err(ggtt->tile,
+				    "MTL SR-IOV GSM access not permitted by firmware (permission %#x)\n",
+				    permission);
+			return -EOPNOTSUPP;
+		}
+
+		base = xe_mmio_read64_2x32(xe_root_tile_mmio(xe), GSMBASE) & BDSM_MASK;
+		if (!base)
+			return -ENODEV;
+
+		ggtt->gsm = devm_ioremap(xe->drm.dev, base, gsm_size);
+		if (!ggtt->gsm)
+			return -ENOMEM;
+	}
 	if (IS_DGFX(xe) && xe->info.vram_flags & XE_VRAM_FLAGS_NEED64K)
 		ggtt->flags |= XE_GGTT_FLAGS_64K;
 
@@ -571,18 +600,29 @@ err:
 	return err;
 }
 
-static void ggtt_invalidate_gt_tlb(struct xe_gt *gt)
+static void ggtt_invalidate_gt_tlb(struct xe_gt *gt, bool use_mmio)
 {
 	int err;
 
 	if (!gt)
 		return;
 
+	if (use_mmio) {
+		CLASS(xe_force_wake, fw_ref)(gt_to_fw(gt), XE_FW_GT);
+
+		if (xe_gt_WARN(gt, !xe_force_wake_ref_has_domain(fw_ref.domains, XE_FW_GT),
+			       "Failed to acquire forcewake for GGTT invalidation"))
+			return;
+
+		xe_mmio_write32(&gt->mmio, GUC_TLB_INV_CR, GUC_TLB_INV_CR_INVALIDATE);
+		return;
+	}
+
 	err = xe_tlb_inval_ggtt(&gt->tlb_inval);
 	xe_gt_WARN(gt, err, "Failed to invalidate GGTT (%pe)", ERR_PTR(err));
 }
 
-static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
+static void xe_ggtt_flush_writes(struct xe_ggtt *ggtt)
 {
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
 
@@ -593,10 +633,23 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 	 * do a mmio read here which results in GuC reading correct GGTT page.
 	 */
 	xe_mmio_read32(xe_root_tile_mmio(xe), VF_CAP_REG);
+}
+
+static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
+{
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+	bool use_mmio = IS_SRIOV_PF(xe) && xe->info.platform == XE_METEORLAKE &&
+			MEDIA_VERx100(xe) == 1300;
+
+	xe_ggtt_flush_writes(ggtt);
+
+	/* Match the working MTL PF path when assigning VF GGTT ownership. */
+	if (use_mmio)
+		drm_info_once(&xe->drm, "Using MMIO GGTT invalidation on MTL SR-IOV PF\n");
 
 	/* Each GT in a tile has its own TLB to cache GGTT lookups */
-	ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt);
-	ggtt_invalidate_gt_tlb(ggtt->tile->media_gt);
+	ggtt_invalidate_gt_tlb(ggtt->tile->primary_gt, use_mmio);
+	ggtt_invalidate_gt_tlb(ggtt->tile->media_gt, use_mmio);
 }
 
 /**
