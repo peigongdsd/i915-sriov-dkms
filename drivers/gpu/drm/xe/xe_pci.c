@@ -388,6 +388,7 @@ static const struct xe_device_desc mtl_desc = {
 	.dma_mask_size = 46,
 	.has_display = true,
 	.has_pxp = true,
+	.has_sriov = true,
 	.max_gt_per_tile = 2,
 	MULTI_LRC_MASK,
 	.va_bits = 48,
@@ -1177,6 +1178,12 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct xe_device *xe;
 	void *group;
 	int err;
+
+	/* Host-side VFs are identifiable before accessing their MMIO window. */
+	if (desc->platform == XE_METEORLAKE && pdev->is_virtfn) {
+		dev_err(&pdev->dev, "Native Xe MTL/ARL VF GGTT updates are not supported\n");
+		return -EOPNOTSUPP;
+	}
 
 	subplatform_desc = find_subplatform(desc, pdev->device);
 
