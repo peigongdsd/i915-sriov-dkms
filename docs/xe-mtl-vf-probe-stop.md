@@ -1,5 +1,9 @@
 # Guest-only MTL VF probe diagnostic
 
+This describes the historical v1 test at `b7cefff`. On the v2 branch use
+[the BO-mapping-stop plan](xe-mtl-vf-map-stop.md); its stop boundary and
+diagnostic identity differ.
+
 Branch: `codex/xe-mtl-vf-probe-stop-v1`.
 Base: `e9130affe933dfc45309dc7a82599a1d7a38517e`.
 Diagnostic identity in the kernel log: `diagnostic=mtl-stop-v1`.
