@@ -705,6 +705,8 @@ void xe_guc_comm_init_early(struct xe_guc *guc)
 {
 	struct xe_gt *gt = guc_to_gt(guc);
 
+	mutex_init(&guc->vf_mmio_lock);
+
 	if (xe_gt_is_media_type(gt))
 		guc->notify_reg = MED_GUC_HOST_INTERRUPT;
 	else
@@ -1493,6 +1495,7 @@ int xe_guc_auth_huc(struct xe_guc *guc, u32 rsa_addr)
 
 #define MAX_RETRIES_ON_FLR	2
 #define MIN_SLEEP_MS_ON_FLR	256
+#define MAX_MMIO_RETRIES		16
 
 int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *request,
 			  u32 len, u32 *response_buf)
@@ -1504,10 +1507,12 @@ int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *request,
 		MED_VF_SW_FLAG(0) : VF_SW_FLAG(0);
 	const u32 LAST_INDEX = VF_SW_FLAG_COUNT - 1;
 	unsigned int sleep_period_ms = 1;
-	unsigned int lost = 0;
+	unsigned int lost = 0, retries = 0;
 	u32 header;
 	int ret;
 	int i;
+
+	guard(mutex)(&guc->vf_mmio_lock);
 
 	BUILD_BUG_ON(VF_SW_FLAG_COUNT != MED_VF_SW_FLAG_COUNT);
 
@@ -1591,6 +1596,9 @@ timeout:
 
 		xe_gt_dbg(gt, "GuC mmio request %#x: retrying, reason %#x\n",
 			  request[0], reason);
+
+		if (++retries > MAX_MMIO_RETRIES)
+			return -ETIMEDOUT;
 
 		xe_sleep_exponential_ms(&sleep_period_ms, 256);
 		goto retry;

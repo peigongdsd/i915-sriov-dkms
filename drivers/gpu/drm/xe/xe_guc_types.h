@@ -52,6 +52,8 @@ struct xe_guc_id_mgr {
  * struct xe_guc - Graphic micro controller
  */
 struct xe_guc {
+	/** @vf_mmio_lock: Serialize VF scratch-register transactions. */
+	struct mutex vf_mmio_lock;
 	/** @fw: Generic uC firmware management */
 	struct xe_uc_fw fw;
 	/** @log: GuC log */
