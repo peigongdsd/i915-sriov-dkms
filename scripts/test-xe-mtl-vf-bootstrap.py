@@ -20,6 +20,8 @@ update = vf[vf.index('void xe_gt_sriov_vf_bootstrap_update('):
             vf.index('/* No GGTT update is outstanding:')]
 quiesce = vf[vf.index('void xe_gt_sriov_vf_bootstrap_quiesce('):
               vf.index('static int guc_action_match_version(')]
+negotiation = vf[vf.index('static int guc_action_match_version('):
+                 vf.index('/**\n * xe_gt_sriov_vf_bootstrap -')]
 mapper = ggtt[ggtt.index('static void vf_bootstrap_map_bo('):
               ggtt.index('/**\n * xe_ggtt_map_bo -')]
 unmapper = ggtt[ggtt.index('static void vf_bootstrap_unmap_node('):
@@ -28,11 +30,14 @@ abi = (xe / 'abi/guc_actions_sriov_abi.h').read_text()
 constants = '\n'.join(line for line in abi.splitlines() if line.startswith('#define ') and
                       any(name in line for name in (
                           'GUC_ACTION_VF2GUC_MMIO_RELAY_SERVICE', 'GUC_ACTION_VF2GUC_VF_RESET',
-                          'VF2GUC_MMIO_RELAY_SERVICE_',
+                          'VF2GUC_MMIO_RELAY_SERVICE_', 'GUC_ACTION_VF2GUC_MATCH_VERSION',
+                          'VF2GUC_MATCH_VERSION_', 'GUC_VERSION_',
                           'IOV_OPCODE_VF2PF_MMIO_', 'VF2PF_MMIO_HANDSHAKE_')))
 abi = (xe / 'abi/guc_relay_actions_abi.h').read_text()
 constants += '\n' + '\n'.join(line for line in abi.splitlines()
                               if line.startswith('#define ') and 'VF2PF_UPDATE_GGTT32_' in line)
+constants += '\n' + '\n'.join(line for line in (xe / 'xe_guc.h').read_text().splitlines()
+                              if line.startswith(('#define MAKE_GUC_VER(', '#define MAKE_GUC_VER_STRUCT(')))
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -51,6 +56,13 @@ typedef uint64_t u64;
 #define FIELD_MAX(m) FIELD_GET(m,m)
 #define FIELD_FIT(m,v) ((u64)(v) <= FIELD_MAX(m))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#define BUILD_BUG_ON(c) _Static_assert(!(c), #c)
+#define unlikely(x) (x)
+#define xe_gt_assert(g,c) assert(c)
+#define xe_gt_sriov_err(...) ((void)0)
+#define xe_gt_sriov_info(...) ((void)0)
+#define xe_gt_sriov_notice(...) ((void)0)
+#define xe_gt_sriov_dbg(...) ((void)0)
 #define noinline __attribute__((noinline))
 #define __noreturn __attribute__((noreturn))
 #define lower_32_bits(x) ((u32)(x))
@@ -65,8 +77,19 @@ typedef uint64_t u64;
 #define XE_PTE_SHIFT 12
 #define XE_PAGE_SIZE 4096
 #define XE_PAGE_PRESENT 1
-struct xe_gt_sriov_vf { bool test_reset_seen, test_relay_ready; u8 test_magic; };
-struct xe_guc { bool ct; };
+struct xe_uc_fw_version { u32 branch, major, minor, patch; };
+struct xe_gt_sriov_vf {
+    bool test_reset_seen, test_relay_ready; u8 test_magic;
+    struct xe_uc_fw_version guc_version, wanted_guc_version;
+};
+struct xe_gt;
+struct xe_guc { bool ct; struct xe_gt *gt; };
+struct xe_device { struct { int platform; } info; };
+enum { XE_TIGERLAKE, XE_PVC, XE_METEORLAKE };
+static struct xe_device device = {{XE_METEORLAKE}};
+#define gt_to_xe(g) (&device)
+#define guc_to_gt(g) ((g)->gt)
+#define IS_SRIOV_VF(x) true
 struct xe_gt { struct { struct xe_gt_sriov_vf vf; } sriov; struct {struct xe_guc guc;} uc; };
 #define xe_guc_ct_enabled(c) (*(c))
 struct xe_tile { struct xe_gt *primary_gt; unsigned id; };
@@ -90,7 +113,8 @@ mock = r'''
 static u64 pt[4096];
 static unsigned updates, handshakes, duplicate_batches, replicate_batches, fail_update;
 static bool fail_handshake, fail_reset, bad_count;
-static unsigned resets, disables;
+static bool guc_negotiated, pf_negotiated, fail_version, changed_version;
+static unsigned resets, disables, version_requests, version_queries, invalid_state;
 static void xe_guc_ct_disable(bool *ct) { *ct = false; disables++; }
 static unsigned counts[4096];
 static int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *req, u32 len, u32 *resp)
@@ -98,10 +122,12 @@ static int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *req, u32 le
     (void)guc;
     if (FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_VF_RESET) {
         assert(len == 1 && !resp); resets++;
+        guc_negotiated = pf_negotiated = false;
         return fail_reset ? -ETIMEDOUT : 0;
     }
     assert(len == 4);
     assert(FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_MMIO_RELAY_SERVICE);
+    if (!guc_negotiated) { invalid_state++; return -ENXIO; }
     memset(resp, 0, 4*sizeof(u32));
     resp[0] = 0xf0000000u | (req[0] & VF2GUC_MMIO_RELAY_SERVICE_MSG_0_MAGIC);
     unsigned opcode = FIELD_GET(VF2GUC_MMIO_RELAY_SERVICE_REQUEST_MSG_0_OPCODE, req[0]);
@@ -109,10 +135,12 @@ static int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *req, u32 le
         handshakes++;
         assert(req[1] == 0x10000 && !req[2] && !req[3]);
         if (fail_handshake) return -ETIMEDOUT;
+        pf_negotiated = true;
         resp[1] = 0x10000;
         return resp[0] & 0xfffffff;
     }
     assert(opcode == IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT);
+    assert(pf_negotiated);
     unsigned page = FIELD_GET(VF2PF_UPDATE_GGTT32_OFFSET, req[1]);
     unsigned n = FIELD_GET(VF2PF_UPDATE_GGTT32_COPIES, req[1]) + 1;
     unsigned mode = FIELD_GET(VF2PF_UPDATE_GGTT32_MODE, req[1]);
@@ -127,6 +155,29 @@ static int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *req, u32 le
     resp[0] |= bad_count ? n-1 : n;
     return resp[0] & 0xfffffff;
 }
+/* Exercise the real version encoder/validator; only firmware replies are fake. */
+static int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *req, u32 len, u32 *resp)
+{
+    assert(!guc->ct && resets == 1 && disables == 1);
+    assert(len == VF2GUC_MATCH_VERSION_REQUEST_MSG_LEN);
+    assert(FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_MATCH_VERSION);
+    assert(!FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MBZ, req[1]));
+    unsigned major = FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MAJOR, req[1]);
+    if (major == GUC_VERSION_MAJOR_ANY) {
+        version_queries++;
+    } else {
+        version_requests++;
+        assert(major == 1 && FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MINOR, req[1]) == 2);
+        if (fail_version) return -ENXIO;
+        guc_negotiated = true;
+    }
+    memset(resp, 0, GUC_MAX_MMIO_MSG_LEN * sizeof(u32));
+    resp[0] = 0xf0000000u;
+    resp[1] = FIELD_PREP(VF2GUC_MATCH_VERSION_RESPONSE_MSG_1_MAJOR, 1) |
+              FIELD_PREP(VF2GUC_MATCH_VERSION_RESPONSE_MSG_1_MINOR, changed_version ? 3 : 2);
+    return 0;
+}
+static int vf_handshake_with_guc(struct xe_gt *gt);
 '''
 main = r'''
 static struct xe_gt gt;
@@ -138,6 +189,8 @@ static const u64 flags = 0x20000000000001ULL;
 static void setup(unsigned pages, bool fragmented)
 {
     memset(&gt, 0, sizeof(gt));
+    gt.uc.guc.gt = &gt;
+    gt.sriov.vf.guc_version = (struct xe_uc_fw_version){0, 1, 2, 0};
     tile = (struct xe_tile){&gt, 0};
     ggtt = (struct xe_ggtt){&tile, false};
     node = (struct xe_ggtt_node){&ggtt, {7*4096, (u64)pages*4096}, false};
@@ -146,7 +199,9 @@ static void setup(unsigned pages, bool fragmented)
     memset(pt, 0, sizeof(pt));
     updates = handshakes = duplicate_batches = replicate_batches = fail_update = 0;
     fail_handshake = fail_reset = bad_count = false;
-    resets = disables = 0;
+    resets = disables = version_requests = version_queries = invalid_state = 0;
+    guc_negotiated = true;
+    pf_negotiated = fail_version = changed_version = false;
 }
 int main(void)
 {
@@ -209,13 +264,44 @@ int main(void)
     if (!setjmp(held)) { xe_gt_sriov_vf_bootstrap_quiesce(&gt); assert(0); }
     assert(!resets && !disables);
     puts("PASS unexpected reset event: no recovery or cleanup attempted");
+    setup(1025, false);
+    vf_bootstrap_map_bo(&ggtt, &bo, flags);
+    gt.uc.guc.ct = true;
+    xe_gt_sriov_vf_bootstrap_quiesce(&gt);
+    assert(version_requests == 1 && !version_queries && guc_negotiated && !pf_negotiated);
+    vf_bootstrap_unmap_node(&node);
+    assert(!gt.uc.guc.ct && !node.test_mapped && handshakes == 2 && updates == 4);
+    assert(!invalid_state);
+    for (unsigned i=0; i<1025; i++) assert(pt[7+i] == 1);
+    puts("PASS map-reset-renegotiate-clear: version restored before PF handshake, CT stays disabled");
+    setup(1, false);
+    vf_bootstrap_map_bo(&ggtt, &bo, flags);
+    /* Model v5's missing negotiation after successful reset. */
+    guc_negotiated = pf_negotiated = gt.sriov.vf.test_relay_ready = false;
+    if (!setjmp(held)) { vf_bootstrap_unmap_node(&node); assert(0); }
+    assert(invalid_state == 1 && node.test_mapped && updates == 1 && !duplicate_batches);
+    puts("PASS old sequence: INVALID_STATE before clear; mapping retained");
+    setup(1, false);
+    vf_bootstrap_map_bo(&ggtt, &bo, flags);
+    fail_version = true;
+    if (!setjmp(held)) { xe_gt_sriov_vf_bootstrap_quiesce(&gt); assert(0); }
+    assert(node.test_mapped && updates == 1 && !duplicate_batches && !guc_negotiated);
+    assert(version_requests == 1 && version_queries == 1 && handshakes == 1);
+    puts("PASS failed post-reset version match: diagnostic version query only, no clear");
+    setup(1, false);
+    vf_bootstrap_map_bo(&ggtt, &bo, flags);
+    changed_version = true;
+    if (!setjmp(held)) { xe_gt_sriov_vf_bootstrap_quiesce(&gt); assert(0); }
+    assert(node.test_mapped && updates == 1 && !duplicate_batches && handshakes == 1);
+    assert(version_requests == 1);
+    puts("PASS changed post-reset interface: existing Xe version check holds before clear");
     return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='xe-bootstrap-test-') as temp:
     c = Path(temp) / 'test.c'
     exe = Path(temp) / 'test'
-    c.write_text(prefix + constants + mock + helpers + update + quiesce + mapper + unmapper + main)
+    c.write_text(prefix + constants + mock + helpers + update + quiesce + negotiation + mapper + unmapper + main)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-Wall', '-Wextra',
                     '-Werror', '-Wno-sign-compare', '-Wno-unused-parameter',
                     '-Wno-unused-but-set-variable', '-I', str(xe),

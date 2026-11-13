@@ -122,7 +122,9 @@ int xe_gt_sriov_vf_reset(struct xe_gt *gt)
 	return vf_reset_guc_state(gt);
 }
 
-/* V4 experiment only: one serialized transaction before memirq/CT setup. */
+static int vf_handshake_with_guc(struct xe_gt *gt);
+
+/* Serialized diagnostic relay before CT setup or after consumer reset. */
 static int vf_test_mmio_relay(struct xe_gt *gt, u8 opcode, u8 magic,
 			      u32 data1, u32 data2, u32 data3, u32 *response)
 {
@@ -151,7 +153,7 @@ noinline __noreturn void xe_gt_sriov_vf_test_hold(struct xe_gt *gt,
 	DECLARE_COMPLETION_ONSTACK(hold);
 
 	xe_gt_err(gt,
-		  "VFPROBE: %s completion uncertain (%d); holding probe and BO; keep VM and VF assigned\n",
+		  "VFPROBE: %s failed (%d); holding probe and BO; keep VM and VF assigned\n",
 		  stage, err);
 	/*
 	 * Do not unwind or retry. The still-running probe retains its BO, DMA
@@ -271,6 +273,13 @@ void xe_gt_sriov_vf_bootstrap_quiesce(struct xe_gt *gt)
 		xe_gt_sriov_vf_test_hold(gt, "bootstrap consumer reset", ret);
 	gt->sriov.vf.test_relay_ready = false;
 	xe_gt_info(gt, "VFPROBE: bootstrap consumer reset acknowledged\n");
+
+	/* Reset also drops the GuC interface negotiated during VF bootstrap. */
+	xe_gt_info(gt, "VFPROBE: before post-reset GuC version handshake\n");
+	ret = vf_handshake_with_guc(gt);
+	if (ret)
+		xe_gt_sriov_vf_test_hold(gt, "post-reset GuC version handshake", ret);
+	xe_gt_info(gt, "VFPROBE: post-reset GuC version handshake acknowledged\n");
 }
 
 static int guc_action_match_version(struct xe_guc *guc,
