@@ -9,12 +9,16 @@
 #include "abi/guc_relay_actions_abi.h"
 
 #include "regs/xe_gsc_regs.h"
-#include "regs/xe_gsc_regs.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_guc_regs.h"
 
 #include "xe_assert.h"
+#include "xe_ggtt.h"
+#include "xe_gt.h"
+#include "xe_gt_sriov_pf_control.h"
+#include "xe_gt_sriov_pf_helpers.h"
 #include "xe_mmio.h"
+#include "xe_pm.h"
 #include "xe_gt_sriov_printk.h"
 #include "xe_gt_sriov_pf_service.h"
 #include "xe_gt_sriov_pf_service_types.h"
@@ -23,6 +27,9 @@
 #include "xe_sriov.h"
 #include "xe_sriov_pf_helpers.h"
 #include "xe_sriov_pf_service.h"
+#include "xe_tlb_inval.h"
+
+static void pf_mmio_ggtt_worker(struct work_struct *work);
 
 static const struct xe_reg tgl_runtime_regs[] = {
 	RPM_CONFIG0,			/* _MMIO(0x0d00) */
@@ -241,11 +248,23 @@ static void pf_prepare_runtime_info(struct xe_gt *gt)
  */
 int xe_gt_sriov_pf_service_init(struct xe_gt *gt)
 {
+	u32 vfid;
 	int err;
 
 	err = pf_alloc_runtime_info(gt);
 	if (unlikely(err))
 		goto failed;
+
+	if (xe_gt_sriov_pf_service_has_ggtt_relay(gt)) {
+		for (vfid = 1; vfid <= xe_gt_sriov_pf_get_totalvfs(gt); vfid++) {
+			struct xe_gt_sriov_pf_mmio_ggtt *request;
+
+			request = &gt->sriov.pf.vfs[vfid].mmio_ggtt;
+			request->gt = gt;
+			request->vfid = vfid;
+			INIT_WORK(&request->work, pf_mmio_ggtt_worker);
+		}
+	}
 
 	return 0;
 failed:
@@ -377,6 +396,152 @@ static int pf_process_runtime_query_msg(struct xe_gt *gt, u32 origin,
 	return VF2PF_QUERY_RUNTIME_RESPONSE_MSG_MIN_LEN + ret * hxg_sizeof(struct reg_data);
 }
 
+bool xe_gt_sriov_pf_service_has_ggtt_relay(struct xe_gt *gt)
+{
+	struct xe_device *xe = gt_to_xe(gt);
+
+	return IS_SRIOV_PF(xe) && xe->info.platform == XE_METEORLAKE &&
+	       MEDIA_VERx100(xe) == 1300;
+}
+
+bool xe_gt_sriov_pf_service_ggtt_snapshot(struct xe_gt *gt, u32 vfid,
+					  struct xe_gt_sriov_pf_ggtt_token *token)
+{
+	struct xe_gt *primary = gt->tile->primary_gt, *media = gt->tile->media_gt;
+
+	if (!vfid || vfid > xe_gt_sriov_pf_get_totalvfs(gt))
+		return false;
+
+	token->generation = atomic_read(&primary->sriov.pf.vfs[vfid].ggtt_generation);
+	token->primary_epoch = atomic_read(&primary->sriov.pf.service.ggtt_epoch);
+	token->media_epoch = media ? atomic_read(&media->sriov.pf.service.ggtt_epoch) : 0;
+
+	return xe_gt_sriov_pf_service_ggtt_current(gt, vfid, token);
+}
+
+static bool pf_ggtt_gt_current(struct xe_gt *gt, u32 vfid, u32 epoch)
+{
+	return !READ_ONCE(gt->sriov.pf.service.ggtt_stopped) &&
+	       xe_guc_ct_enabled(&gt->uc.guc.ct) &&
+	       gt->uc.guc.submission_state.enabled &&
+	       !xe_gt_sriov_pf_control_flr_in_progress(gt, vfid) &&
+	       epoch == atomic_read(&gt->sriov.pf.service.ggtt_epoch);
+}
+
+bool xe_gt_sriov_pf_service_ggtt_current(struct xe_gt *gt, u32 vfid,
+					 const struct xe_gt_sriov_pf_ggtt_token *token)
+{
+	struct xe_gt *primary = gt->tile->primary_gt, *media = gt->tile->media_gt;
+
+	return !xe_device_wedged(gt_to_xe(gt)) &&
+	       pf_ggtt_gt_current(primary, vfid, token->primary_epoch) &&
+	       (!media || pf_ggtt_gt_current(media, vfid, token->media_epoch)) &&
+	       token->generation == atomic_read(&primary->sriov.pf.vfs[vfid].ggtt_generation);
+}
+
+void xe_gt_sriov_pf_service_reset_ggtt(struct xe_gt *gt, u32 vfid)
+{
+	if (xe_gt_sriov_pf_service_has_ggtt_relay(gt))
+		atomic_inc(&gt->tile->primary_gt->sriov.pf.vfs[vfid].ggtt_generation);
+}
+
+void xe_gt_sriov_pf_service_stop_ggtt_ct(struct xe_gt *gt)
+{
+	if (xe_gt_sriov_pf_service_has_ggtt_relay(gt))
+		atomic_inc(&gt->sriov.pf.service.ggtt_epoch);
+}
+
+void xe_gt_sriov_pf_service_fini_ggtt(struct xe_gt *gt)
+{
+	struct xe_gt *other = gt == gt->tile->primary_gt ?
+		gt->tile->media_gt : gt->tile->primary_gt;
+	u32 vfid;
+
+	if (!xe_gt_sriov_pf_service_has_ggtt_relay(gt))
+		return;
+
+	scoped_guard(mutex, &gt->uc.guc.ct.lock)
+		WRITE_ONCE(gt->sriov.pf.service.ggtt_stopped, true);
+
+	/* The sibling can also have queued requests for this tile's GGTT. */
+	if (other) {
+		mutex_lock(&other->uc.guc.ct.lock);
+		mutex_unlock(&other->uc.guc.ct.lock);
+		flush_work(&other->uc.guc.relay.worker);
+	}
+
+	flush_work(&gt->uc.guc.relay.worker);
+	for (vfid = 1; vfid <= xe_gt_sriov_pf_get_totalvfs(gt); vfid++) {
+		if (other)
+			cancel_work_sync(&other->sriov.pf.vfs[vfid].mmio_ggtt.work);
+		cancel_work_sync(&gt->sriov.pf.vfs[vfid].mmio_ggtt.work);
+	}
+}
+
+static int pf_update_ggtt(struct xe_gt *gt, u32 vfid,
+			  const struct xe_gt_sriov_pf_ggtt_token *token,
+			  u32 desc, const u64 *ptes, unsigned int count)
+{
+	struct xe_gt *primary = gt->tile->primary_gt, *media = gt->tile->media_gt;
+	int updated, err, media_err = 0;
+
+	scoped_guard(mutex, xe_gt_sriov_pf_master_mutex(gt)) {
+		struct xe_ggtt_node *node;
+
+		if (!xe_gt_sriov_pf_service_ggtt_current(gt, vfid, token))
+			return -ECANCELED;
+
+		node = primary->sriov.pf.vfs[vfid].config.ggtt_region;
+		if (!node)
+			return -ENOENT;
+
+		updated = xe_ggtt_update_vf_ptes(node, vfid, desc, ptes, count);
+	}
+	if (updated < 0)
+		return updated;
+
+	/* Invalidate the tile's TLBs without holding the provisioning lock. */
+	err = xe_tlb_inval_ggtt_sync(&primary->tlb_inval);
+	if (media)
+		media_err = xe_tlb_inval_ggtt_sync(&media->tlb_inval);
+
+	if (!xe_gt_sriov_pf_service_ggtt_current(gt, vfid, token))
+		return -ECANCELED;
+	return err ?: media_err ?: updated;
+}
+
+static int pf_process_update_ggtt_msg(struct xe_gt *gt, u32 vfid,
+				       const u32 *msg, u32 len, u32 *response, u32 size,
+				       const struct xe_gt_sriov_pf_ggtt_token *token)
+{
+	u64 ptes[VF2PF_UPDATE_GGTT32_MAX_PTES];
+	unsigned int count, i;
+	int ret;
+
+	if (!token)
+		return -EOPNOTSUPP;
+	if (!xe_gt_sriov_pf_service_ggtt_current(gt, vfid, token))
+		return -ECANCELED;
+	if (len < 4 || len > GUC_RELAY_MSG_MAX_LEN || (len & 1) ||
+	    FIELD_GET(GUC_HXG_REQUEST_MSG_0_DATA0, msg[0]))
+		return -EPROTO;
+	if (!size)
+		return -ENOBUFS;
+	if (!xe_sriov_pf_service_is_negotiated(gt_to_xe(gt), vfid, 1, 0))
+		return -EACCES;
+
+	count = (len - 2) / 2;
+	for (i = 0; i < count; i++)
+		ptes[i] = ((u64)msg[3 + 2 * i] << 32) | msg[2 + 2 * i];
+
+	guard(xe_pm_runtime)(gt_to_xe(gt));
+	ret = pf_update_ggtt(gt, vfid, token, msg[1], ptes, count);
+	if (ret < 0)
+		return ret;
+
+	return guc_hxg_msg_encode_success(response, ret);
+}
+
 /**
  * xe_gt_sriov_pf_service_process_request - Service GT level SR-IOV request message from the VF.
  * @gt: the &xe_gt that provides the service
@@ -385,6 +550,7 @@ static int pf_process_runtime_query_msg(struct xe_gt *gt, u32 origin,
  * @msg_len: length of the request message (in dwords)
  * @response: placeholder for the response message
  * @resp_size: length of the response message buffer (in dwords)
+ * @token: receive-time VF/CT state for a GGTT update, otherwise NULL
  *
  * This function processes `Relay Message`_ request from the VF.
  *
@@ -392,7 +558,8 @@ static int pf_process_runtime_query_msg(struct xe_gt *gt, u32 origin,
  */
 int xe_gt_sriov_pf_service_process_request(struct xe_gt *gt, u32 origin,
 					   const u32 *msg, u32 msg_len,
-					   u32 *response, u32 resp_size)
+					   u32 *response, u32 resp_size,
+					   const struct xe_gt_sriov_pf_ggtt_token *token)
 {
 	u32 action, data __maybe_unused;
 	int ret;
@@ -411,6 +578,10 @@ int xe_gt_sriov_pf_service_process_request(struct xe_gt *gt, u32 origin,
 		break;
 	case GUC_RELAY_ACTION_VF2PF_QUERY_RUNTIME:
 		ret = pf_process_runtime_query_msg(gt, origin, msg, msg_len, response, resp_size);
+		break;
+	case GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32:
+		ret = pf_process_update_ggtt_msg(gt, origin, msg, msg_len, response,
+						 resp_size, token);
 		break;
 	default:
 		ret = -EOPNOTSUPP;
@@ -497,6 +668,60 @@ static int pf_send_mmio_relay_error(struct xe_gt *gt, u32 vfid, u32 magic, u8 fa
 	};
 
 	return xe_guc_ct_send_g2h_handler(&gt->uc.guc.ct, request, ARRAY_SIZE(request));
+}
+
+static void pf_mmio_ggtt_worker(struct work_struct *work)
+{
+	struct xe_gt_sriov_pf_mmio_ggtt *request = container_of(work, typeof(*request), work);
+	struct xe_gt *gt = request->gt;
+	struct xe_guc_ct *ct = &gt->uc.guc.ct;
+	int ret;
+
+	guard(xe_pm_runtime)(gt_to_xe(gt));
+	ret = pf_update_ggtt(gt, request->vfid, &request->token,
+			     request->desc, &request->pte, 1);
+
+	guard(mutex)(&ct->lock);
+	if (xe_gt_sriov_pf_service_ggtt_current(gt, request->vfid, &request->token)) {
+		if (ret < 0) {
+			ret = pf_send_mmio_relay_error(gt, request->vfid, request->magic,
+						      min(-ret, (int)U8_MAX));
+		} else {
+			u32 data[4] = { ret };
+
+			ret = pf_send_mmio_relay_reply(gt, request->vfid, request->magic, data);
+		}
+
+		if (ret && ret != -ECANCELED)
+			xe_gt_sriov_dbg_verbose(gt, "VF%u GGTT MMIO reply failed (%pe)\n",
+						request->vfid, ERR_PTR(ret));
+	}
+	request->pending = false;
+}
+
+static int pf_queue_mmio_ggtt(struct xe_gt *gt, u32 vfid, u32 magic, const u32 *payload)
+{
+	struct xe_gt_sriov_pf_mmio_ggtt *request = &gt->sriov.pf.vfs[vfid].mmio_ggtt;
+	struct xe_gt_sriov_pf_ggtt_token token;
+
+	lockdep_assert_held(&gt->uc.guc.ct.lock);
+
+	if (!xe_gt_sriov_pf_service_has_ggtt_relay(gt))
+		return pf_send_mmio_relay_error(gt, vfid, magic, EOPNOTSUPP);
+	if (request->pending)
+		return pf_send_mmio_relay_error(gt, vfid, magic, EBUSY);
+
+	if (!xe_gt_sriov_pf_service_ggtt_snapshot(gt, vfid, &token))
+		return 0;
+
+	request->token = token;
+	request->magic = magic;
+	request->desc = payload[0];
+	request->pte = ((u64)payload[2] << 32) | payload[1];
+	request->pending = true;
+	/* GGTT invalidation waits for GuC CT, so do it outside the G2H handler. */
+	queue_work(gt_to_xe(gt)->sriov.wq, &request->work);
+	return 0;
 }
 
 static int pf_reply_mmio_relay_handshake(struct xe_gt *gt, u32 vfid, u32 magic, const u32 *payload)
@@ -613,6 +838,13 @@ int xe_gt_sriov_pf_service_process_mmio_relay(struct xe_gt *gt, const u32 *msg, 
 	switch (opcode) {
 	case IOV_OPCODE_VF2PF_MMIO_HANDSHAKE:
 		ret = pf_reply_mmio_relay_handshake(gt, vfid, magic, msg + 2);
+		break;
+	case IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT:
+		if (msg[2] & ~(GUC2PF_MMIO_RELAY_SERVICE_EVENT_MSG_2_MAGIC |
+			       GUC2PF_MMIO_RELAY_SERVICE_EVENT_MSG_2_OPCODE))
+			return pf_send_mmio_relay_error(gt, vfid, magic, EPROTO);
+
+		ret = pf_queue_mmio_ggtt(gt, vfid, magic, msg + 3);
 		break;
 	case IOV_OPCODE_VF2PF_MMIO_GET_RUNTIME:
 		ret = pf_reply_mmio_relay_get_runtime(gt, vfid, magic, msg + 2);

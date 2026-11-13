@@ -15,6 +15,7 @@
 #include <drm/intel/i915_drm.h>
 #include <generated/xe_wa_oob.h>
 
+#include "abi/guc_relay_actions_abi.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_gtt_defs.h"
 #include "regs/xe_guc_regs.h"
@@ -1037,6 +1038,52 @@ void xe_ggtt_assign(const struct xe_ggtt_node *node, u16 vfid)
 {
 	guard(mutex)(&node->ggtt->lock);
 	xe_ggtt_assign_locked(node, vfid);
+}
+
+/*
+ * The caller holds the PF configuration mutex while writing, keeping
+ * the node allocated and excluding VF sanitization.
+ */
+int xe_ggtt_update_vf_ptes(struct xe_ggtt_node *node, u16 vfid, u32 desc,
+			   const u64 *ptes, unsigned int count)
+{
+	const u64 addr_mask = GENMASK_ULL(45, 12);
+	const u64 pat_mask = XELPG_GGTT_PTE_PAT0 | XELPG_GGTT_PTE_PAT1;
+	const u64 allowed = addr_mask | pat_mask | GGTT_PTE_VFID | XE_PAGE_PRESENT;
+	struct xe_ggtt *ggtt = node->ggtt;
+	u64 relative = (u64)FIELD_GET(VF2PF_UPDATE_GGTT32_OFFSET, desc) * XE_PAGE_SIZE;
+	unsigned int copies = FIELD_GET(VF2PF_UPDATE_GGTT32_COPIES, desc);
+	unsigned int mode = FIELD_GET(VF2PF_UPDATE_GGTT32_MODE, desc);
+	unsigned int selected = mode & VF2PF_UPDATE_GGTT32_LAST ? count - 1 : 0;
+	u64 stride = mode & VF2PF_UPDATE_GGTT32_REPLICATE ? XE_PAGE_SIZE : 0;
+	u64 size = xe_ggtt_node_size(node), addr = xe_ggtt_node_addr(node) + relative;
+	unsigned int i, n;
+
+	if (!count || count > VF2PF_UPDATE_GGTT32_MAX_PTES ||
+	    !vfid || !FIELD_FIT(GGTT_PTE_VFID, vfid))
+		return -EINVAL;
+
+	if (relative > size || (u64)(count + copies) * XE_PAGE_SIZE > size - relative ||
+	    stride * copies > addr_mask - (ptes[selected] & addr_mask))
+		return -ERANGE;
+
+	for (i = 0; i < count; i++)
+		if (!(ptes[i] & XE_PAGE_PRESENT) || ptes[i] & ~allowed)
+			return -EINVAL;
+
+	guard(mutex)(&ggtt->lock);
+
+	for (i = 0; i < count; i++) {
+		u64 pte = (ptes[i] & (addr_mask | pat_mask)) | xe_encode_vfid_pte(vfid);
+		unsigned int repeat = i == selected ? copies : 0;
+
+		for (n = 0; n <= repeat; n++, addr += XE_PAGE_SIZE)
+			ggtt->pt_ops->ggtt_set_pte(ggtt, addr, pte + n * stride);
+	}
+
+	xe_ggtt_flush_writes(ggtt);
+
+	return count + copies;
 }
 
 /**
