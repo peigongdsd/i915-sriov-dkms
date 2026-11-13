@@ -781,7 +781,7 @@ void xe_ggtt_map_bo_unlocked(struct xe_ggtt *ggtt, struct xe_bo *bo)
 	mutex_unlock(&ggtt->lock);
 }
 
-/* Diagnostic only; keep a stable breakpoint before either BO insertion path. */
+/* Diagnostic only: stop unsupported BO shapes and the transform path early. */
 static noinline bool xe_ggtt_vf_probe_stop(struct xe_ggtt *ggtt, struct xe_bo *bo)
 {
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
@@ -794,6 +794,41 @@ static noinline bool xe_ggtt_vf_probe_stop(struct xe_ggtt *ggtt, struct xe_bo *b
 		    xe_bo_size(bo), bo->flags, ggtt->start, ggtt->size);
 	dump_stack();
 	return true;
+}
+
+/* Inspect one candidate PTE without touching the GGTT or issuing a relay. */
+static noinline void xe_ggtt_vf_probe_pte(struct xe_ggtt *ggtt, struct xe_bo *bo,
+					u64 pte_flags, u16 pat_index)
+{
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+	struct xe_ggtt_node *node = bo->ggtt_node[ggtt->tile->id];
+	struct xe_res_cursor cur;
+	u64 addr = xe_ggtt_node_addr(node), dma, pte, bar_offset;
+	struct sg_table *sg;
+
+	if (xe_bo_is_vram(bo) || xe_bo_is_stolen(bo) || !bo->ttm.ttm) {
+		xe_tile_err(ggtt->tile, "VFPROBE: unexpected backing; no PTE inspected\n");
+		return;
+	}
+	sg = xe_bo_sg(bo);
+	if (!sg || !sg->sgl) {
+		xe_tile_err(ggtt->tile, "VFPROBE: missing SG table; no PTE inspected\n");
+		return;
+	}
+
+	/* Same first system-memory entry calculation as xe_ggtt_map_bo(). */
+	xe_res_first_sg(sg, 0, xe_bo_size(bo), &cur);
+	dma = xe_res_dma(&cur);
+	pte = pte_flags | dma;
+	bar_offset = SZ_8M + (addr >> XE_PTE_SHIFT) * sizeof(u64);
+	xe_tile_err(ggtt->tile,
+		    "VFPROBE: PTE plan only, ggtt=%#llx relative=%#llx dma=%#llx pte=%#llx pat=%u\n",
+		    addr, node->base.start, dma, pte, pat_index);
+	xe_tile_err(ggtt->tile,
+		    "VFPROBE: BAR offset=%#llx size=%zu in_bar=%u writer=%ps\n",
+		    bar_offset, xe->mmio.size, bar_offset + sizeof(u64) <= xe->mmio.size,
+		    ggtt->pt_ops->ggtt_set_pte);
+	dump_stack();
 }
 
 /**
@@ -853,12 +888,19 @@ err:
 static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 				  u64 start, u64 end, struct drm_exec *exec)
 {
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+	bool probe_plan = IS_SRIOV_VF(xe) && xe->info.platform == XE_METEORLAKE;
 	u64 alignment = bo->min_align > 0 ? bo->min_align : XE_PAGE_SIZE;
 	u8 tile_id = ggtt->tile->id;
 	int err;
 
-	if (xe_ggtt_vf_probe_stop(ggtt, bo))
+	/* This experiment only advances the observed 4 KiB system-memory BO. */
+	if (probe_plan && (xe_bo_size(bo) != XE_PAGE_SIZE ||
+			   (bo->flags & (XE_BO_FLAG_SYSTEM | XE_BO_FLAG_VRAM_MASK |
+					 XE_BO_FLAG_STOLEN)) != XE_BO_FLAG_SYSTEM)) {
+		xe_ggtt_vf_probe_stop(ggtt, bo);
 		return -EOPNOTSUPP;
+	}
 
 	if (xe_bo_is_vram(bo) && ggtt->flags & XE_GGTT_FLAGS_64K)
 		alignment = SZ_64K;
@@ -869,7 +911,11 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 		return 0;
 	}
 
+	if (probe_plan)
+		xe_tile_info(ggtt->tile, "VFPROBE: before BO validation\n");
 	err = xe_bo_validate(bo, NULL, false, exec);
+	if (probe_plan)
+		xe_tile_info(ggtt->tile, "VFPROBE: BO validation returned %d\n", err);
 	if (err)
 		return err;
 
@@ -913,7 +959,18 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 		u16 pat_index = xe_cache_pat_idx(tile_to_xe(ggtt->tile), cache_mode);
 		u64 pte = ggtt->pt_ops->pte_encode_flags(bo, pat_index);
 
-		xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
+		if (probe_plan) {
+			xe_ggtt_vf_probe_pte(ggtt, bo, pte, pat_index);
+			/* No PTE was submitted: undo only the software reservation. */
+			drm_mm_remove_node(&bo->ggtt_node[tile_id]->base);
+			ggtt_node_fini(bo->ggtt_node[tile_id]);
+			bo->ggtt_node[tile_id] = NULL;
+			err = -EOPNOTSUPP;
+			xe_tile_err(ggtt->tile,
+				    "VFPROBE: unused GGTT node removed; no PTE write or invalidation issued\n");
+		} else {
+			xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
+		}
 	}
 	mutex_unlock(&ggtt->lock);
 
