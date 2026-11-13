@@ -1,5 +1,8 @@
 # MTL VF single-page PF relay experiment, v4
 
+V4 completed downstream at `70dd8d6`. Continue with the
+[v5 functional bootstrap handoff](xe-mtl-vf-bootstrap-test.md) on the new branch.
+
 Branch: `codex/xe-mtl-vf-relay-test-v4`, based on tested v3 `1759b27`.
 Identity: `diagnostic=mtl-relay-test-v4`.
 Explicit guest module parameter: `mtl_vf_relay_test=1`.

@@ -18,7 +18,7 @@ vf = (xe / "xe_gt_sriov_vf.c").read_text()
 transport = guc[guc.index("static int guc_mmio_send_recv("):
                 guc.index("int xe_guc_mmio_send(struct", guc.index("static int guc_mmio_send_recv("))]
 transaction = vf[vf.index("static int vf_test_mmio_relay("):
-                 vf.index("static int guc_action_match_version(")]
+                 vf.index("bool xe_gt_sriov_vf_bootstrap_test(")]
 abi = (xe / "abi/guc_actions_sriov_abi.h").read_text()
 # The tested wire constants come from the real driver header too.
 constants = "\n".join(line for line in abi.splitlines() if line.startswith("#define ") and
