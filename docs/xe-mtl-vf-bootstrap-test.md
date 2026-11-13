@@ -1,7 +1,8 @@
-# MTL VF functional bootstrap experiment, v5
+# MTL VF functional bootstrap experiment, v5.1
 
-Branch: `codex/xe-mtl-vf-bootstrap-v5`, based on tested v4 `70dd8d6`.
-Live identity: `diagnostic=mtl-bootstrap-v5`.
+Branch: `codex/xe-mtl-vf-bootstrap-v5`. The v5.1 follow-up corrects cleanup
+after the v5 run at `43d5e5d`; v4 `70dd8d6` remains the earlier relay baseline.
+Live identity: `diagnostic=mtl-bootstrap-v5.1`.
 Guest module parameter: **`mtl_vf_bootstrap_test=1`**.
 Leave the older `mtl_vf_relay_test` parameter off. Both parameters default off.
 
@@ -21,6 +22,37 @@ zero, absolute GGTT address `0x7ec00000`. No uncertain-completion marker was
 present. The captures were host-local. Those acknowledgements did not test
 CT, interrupt delivery, a workload or independent PTE readback.
 
+## Reported v5 result and v5.1 correction
+
+The supplied 2026-11-14 report identifies v5 `43d5e5d` and records six mapped
+BOs, 549 pages, seven map requests, successful native CT handshake/runtime
+query and three memirq handler dispatches. Both consumer resets were
+acknowledged. The first cleanup PF handshake then received GuC error 0x0a,
+`XE_GUC_RESPONSE_INVALID_STATE`, surfaced by Xe as -ENXIO (-6). No clear was
+submitted on that path and the guest entered the diagnostic hold. This is a
+reported hardware result; the full captures were not independently inspected
+for this follow-up. It is not a successful cleanup or graphics-execution test.
+
+V5 omitted the GuC version handshake after resetting GuC VF state. That
+handshake is distinct from the PF relay handshake. Normal Xe bootstrap
+performs reset followed by `vf_handshake_with_guc()`. V5.1 reuses that same
+helper immediately after each acknowledged cleanup reset, retaining Xe's
+existing interface-version validation. It does not re-enable CT or register
+its buffers. The subsequent PF handshake and clears remain single-attempt.
+The missing negotiation is the leading explanation for the hardware rejection;
+a new run is needed to confirm the correction on this firmware.
+
+The existing version helper retains normal Xe transport behavior and its
+query-only diagnostic on failure. This does not replay a GGTT update. If version
+negotiation fails or the interface changes, the probe holds with its mappings
+still owned. The hold marker now says `failed` rather than classifying every
+error as uncertain completion; retain the preceding GuC response to distinguish
+an explicit rejection from a timeout.
+
+For the already-held v5 VM, read [the recovery assessment](xe-mtl-vf-bootstrap-recovery.md)
+before preparing another assignment. Installing a new file does not change the
+module currently asleep in that VM.
+
 ## Implemented path
 
 The test preserves Xe BO allocation, validation, SG/DMA selection, PAT
@@ -33,8 +65,9 @@ a discontinuity starts another run. Clear uses the existing duplicate mode
 and the PRESENT/ownership-only PTE, also up to 1024 pages per request. The PF
 adds the requesting VFID. It performs its strict invalidation before replying.
 There is no additional VF posting read or invalidation, no direct VF GGTT BAR
-access and no protocol extension. Each request is acknowledged before the
-next; no request is automatically replayed after a lost reply or RETRY.
+access and no protocol extension. Each GGTT relay request is acknowledged
+before the next; no GGTT relay request is automatically replayed after a lost
+reply or RETRY.
 
 These are early MMIO updates. The mapper intentionally refuses updates while
 the primary CT is active. Native CT is exercised using its existing handshake
@@ -63,8 +96,10 @@ performs cleanup while device-managed resources are still live:
 
 1. Stop the guest CT workers and require a successful single-attempt GuC
    VF-state reset on both GTs, stopping consumers of the mapped buffers.
-2. Clear all still-owned mappings through the PF and require completion.
-3. Let normal devres/TTM cleanup remove nodes and release BOs.
+2. After each reset, renegotiate the GuC interface using existing Xe code.
+   Require success without re-enabling CT.
+3. Reconnect the PF relay, clear all still-owned mappings and require completion.
+4. Let normal devres/TTM cleanup remove nodes and release BOs.
 
 The reset here is used only when no GGTT update is outstanding. It is not
 claimed to cancel a late PF update. Any uncertain update already held the
@@ -92,17 +127,19 @@ rules. Use the established fresh assignment/FLR setup and confirm completion
 before loading Xe. Do not change the assignment or reset the VF during probe.
 
 Reuse the existing exact Linux 7.3.3 guest kernel and prepared build tree.
-Build matching Xe/compat modules from the supplied v5 commit with `KCFLAGS=-g`;
+Build matching Xe/compat modules from the supplied v5.1 commit with `KCFLAGS=-g`;
 retain the unstripped module, record SHA-256/vermagic/srcversion, and require
-the live v5 identity. No new guest kernel or host activation is required.
+the live v5.1 identity. No new guest kernel or host activation is required.
 
 Use guest `loglevel=7`. Explicitly load Xe with `mtl_vf_bootstrap_test=1` and
 without `mtl_vf_relay_test=1`. A host-local VF is rejected before mapping.
 Without the new parameter, this branch retains the earlier software-only stop.
 
-Establish independent off-host serial/host-log capture before probing. Prepare
-artifacts and report if that capture is unavailable. Remove automatic module
-load/VM timeout cleanup, guest watchdog restart and panic-on-hung-task behavior.
+Use the host-local serial and host-kernel capture selected by the hardware
+owner for this run. Record that it is host-local; it does not provide independent
+capture if the host itself stops responding. Verify both captures are active
+before probing. Remove automatic module loading, VM timeout cleanup, guest
+watchdog restart and panic-on-hung-task behavior.
 A diagnostic hold must leave the VM running and its VF assigned. Do not kill
 QEMU, shut down the guest, unbind/reset the VF, start Windows, force-remove Xe,
 or bypass the hold in GDB. Report the marker and logs for a separate recovery
@@ -122,7 +159,7 @@ debug build; confirm them again in the target build:
 Expected successful checkpoints include:
 
 ```text
-VFPROBE: diagnostic=mtl-bootstrap-v5 before VF_CAP ...
+VFPROBE: diagnostic=mtl-bootstrap-v5.1 before VF_CAP ...
 VFPROBE: bootstrap MMIO relay ready
 VFPROBE: map acknowledged relative=... pages=... requests=...
 VFPROBE: memirq initialization returned 0
@@ -135,15 +172,19 @@ VFPROBE: native CT handshake and runtime query passed; memirq_dispatches=N
 ... intentional initialization errors ending in -95 ...
 VFPROBE: before bootstrap consumer reset
 VFPROBE: bootstrap consumer reset acknowledged
-... reset acknowledgement for the other GT ...
+VFPROBE: before post-reset GuC version handshake
+VFPROBE: post-reset GuC version handshake acknowledged
+... reset and GuC-version acknowledgements for the other GT ...
+VFPROBE: bootstrap MMIO relay ready
 VFPROBE: unmap acknowledged relative=... pages=...
 VFPROBE: all bootstrap GGTT mappings removed before devres cleanup; ct_passed=1
 ... Xe probe failure -95 ...
 GUEST_ALIVE_AFTER_PROBE
 ```
 
-The final -95 alone is insufficient. Require CT success, successful cleanup,
-no hold/reset-suppressed/migration-suppressed marker, and an alive marker.
+The final -95 alone is insufficient. Require CT success, post-reset GuC-version
+acknowledgements on both GTs, successful cleanup, no hold/reset-suppressed/
+migration-suppressed marker, and an alive marker.
 Report zero memirq dispatches as interrupt delivery unproven. Record the last
 checkpoint on any earlier failure. An ordinary failure may cleanly unwind
 with `ct_passed=0`; do not label that a successful bootstrap test.
@@ -159,13 +200,21 @@ The Xe/compatibility modules build with GCC 16.2.0 and debug information against
 local Linux 7.3.4. Checkpatch and whitespace checks pass. No module was loaded
 on this build host. The target must rebuild for its exact Linux 7.3.3 kernel.
 
-The existing 14 protocol cases still pass. The additional 14 cases in
+The existing 14 protocol cases still pass. The additional 18 cases in
 `scripts/test-xe-mtl-vf-bootstrap.py` compile the actual batching, relay, clear
 and quiescence helpers against scripted DMA addresses and replies. They cover
 1/1024/1025-page runs, fragmented DMA, partial-map response loss, clear response
 loss, handshake failure, bad counts, active-CT/reset guards, size limits,
-consumer-reset acknowledgement and consumer-reset failure. These tests do not
-validate hardware DMA, interrupts, firmware reset semantics or TTM/devres
+consumer-reset acknowledgement and consumer-reset failure. The four new cases
+model firmware losing its negotiated interface on reset: a complete
+map/reset/renegotiate/clear lifecycle, rejection before clear without negotiation,
+failed version matching, and a changed interface version. The real Xe version
+encoder and validator run against the mock firmware replies. Removing the new
+handshake makes the lifecycle test fail. All 32 cases pass locally.
+
+The stateful model encodes the post-reset requirement being tested; it cannot
+prove the firmware's internal state or replace the hardware rerun. These tests
+do not validate hardware DMA, interrupts, firmware reset semantics or TTM/devres
 integration. Those are boundaries for the guest evidence.
 
 A successful result advances functional bootstrap. Full CT-based GGTT updates,
