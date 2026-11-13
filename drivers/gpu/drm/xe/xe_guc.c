@@ -1496,8 +1496,8 @@ int xe_guc_auth_huc(struct xe_guc *guc, u32 rsa_addr)
 #define MAX_RETRIES_ON_FLR	2
 #define MIN_SLEEP_MS_ON_FLR	256
 
-int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *request,
-			  u32 len, u32 *response_buf)
+static int guc_mmio_send_recv(struct xe_guc *guc, const u32 *request,
+			      u32 len, u32 *response_buf, bool replay)
 {
 	struct xe_device *xe = guc_to_xe(guc);
 	struct xe_gt *gt = guc_to_gt(guc);
@@ -1543,6 +1543,8 @@ retry:
 	if (ret) {
 		/* scratch registers might be cleared during FLR, try once more */
 		if (!header) {
+			if (!replay)
+				return -ENOLINK;
 			if (++lost > MAX_RETRIES_ON_FLR) {
 				xe_gt_err(gt, "GuC mmio request %#x: lost, too many retries %u\n",
 					  request[0], lost);
@@ -1591,6 +1593,9 @@ timeout:
 	    GUC_HXG_TYPE_NO_RESPONSE_RETRY) {
 		u32 reason = FIELD_GET(GUC_HXG_RETRY_MSG_0_REASON, header);
 
+		if (!replay)
+			return -EAGAIN;
+
 		xe_gt_dbg(gt, "GuC mmio request %#x: retrying, reason %#x\n",
 			  request[0], reason);
 
@@ -1635,7 +1640,23 @@ proto:
 	/* Use data from the GuC response as our return value */
 	return FIELD_GET(GUC_HXG_RESPONSE_MSG_0_DATA0, header);
 }
+
+int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *request,
+			  u32 len, u32 *response_buf)
+{
+	return guc_mmio_send_recv(guc, request, len, response_buf, true);
+}
 ALLOW_ERROR_INJECTION(xe_guc_mmio_send_recv, ERRNO);
+
+/*
+ * Diagnostic transactions must not replay an update after a lost response.
+ * A negative return does not imply that the original request was cancelled.
+ */
+int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *request,
+			       u32 len, u32 *response_buf)
+{
+	return guc_mmio_send_recv(guc, request, len, response_buf, false);
+}
 
 int xe_guc_mmio_send(struct xe_guc *guc, const u32 *request, u32 len)
 {
