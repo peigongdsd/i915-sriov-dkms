@@ -1,5 +1,8 @@
 # MTL VF PTE planning and rollback diagnostic, v3
 
+V3 has completed downstream. The next experiment is documented in
+[the v4 relay handoff](xe-mtl-vf-relay-test.md).
+
 Branch: `codex/xe-mtl-vf-pte-plan-v3`, based on tested v2 `fe1ff86`.
 Live marker: `diagnostic=mtl-pte-plan-v3`.
 Read [the first-mapping analysis](xe-mtl-first-mapping-analysis.md) for the
