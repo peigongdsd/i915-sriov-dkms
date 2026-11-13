@@ -13,6 +13,7 @@ struct xe_gt;
 struct xe_reg;
 struct xe_uc_fw_version;
 
+int xe_gt_sriov_vf_test_ggtt(struct xe_gt *gt, u32 page, u64 pte);
 int xe_gt_sriov_vf_reset(struct xe_gt *gt);
 int xe_gt_sriov_vf_bootstrap(struct xe_gt *gt);
 void xe_gt_sriov_vf_guc_versions(struct xe_gt *gt,

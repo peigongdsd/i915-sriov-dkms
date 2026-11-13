@@ -41,7 +41,7 @@ static bool test_is_vf(struct xe_device *xe)
 {
 	u32 value;
 
-	drm_info(&xe->drm, "VFPROBE: diagnostic=mtl-pte-plan-v3 before VF_CAP pci_vf=%u\n",
+	drm_info(&xe->drm, "VFPROBE: diagnostic=mtl-relay-test-v4 before VF_CAP pci_vf=%u\n",
 		 to_pci_dev(xe->drm.dev)->is_virtfn);
 	value = xe_mmio_read32(xe_root_tile_mmio(xe), VF_CAP_REG);
 	drm_info(&xe->drm, "VFPROBE: VF_CAP=%#x\n", value);

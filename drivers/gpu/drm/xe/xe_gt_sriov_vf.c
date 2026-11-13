@@ -5,6 +5,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/bsearch.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 
 #include <drm/drm_managed.h>
@@ -118,6 +119,91 @@ int xe_gt_sriov_vf_reset(struct xe_gt *gt)
 		return -ENODEV;
 
 	return vf_reset_guc_state(gt);
+}
+
+/* V4 experiment only: one serialized transaction before memirq/CT setup. */
+static int vf_test_mmio_relay(struct xe_gt *gt, u8 opcode, u8 magic,
+			      u32 data1, u32 data2, u32 data3, u32 *response)
+{
+	u32 request[VF2GUC_MMIO_RELAY_SERVICE_REQUEST_MSG_LEN] = {
+		FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_REQUEST) |
+		FIELD_PREP(GUC_HXG_REQUEST_MSG_0_ACTION, GUC_ACTION_VF2GUC_MMIO_RELAY_SERVICE) |
+		FIELD_PREP(VF2GUC_MMIO_RELAY_SERVICE_MSG_0_MAGIC, magic) |
+		FIELD_PREP(VF2GUC_MMIO_RELAY_SERVICE_REQUEST_MSG_0_OPCODE, opcode),
+		data1, data2, data3,
+	};
+	int ret;
+
+	ret = xe_guc_mmio_send_recv_once(&gt->uc.guc, request, ARRAY_SIZE(request), response);
+	if (ret < 0)
+		return ret;
+	if (FIELD_GET(VF2GUC_MMIO_RELAY_SERVICE_MSG_0_MAGIC, response[0]) != magic)
+		return -EPROTO;
+
+	return FIELD_GET(VF2GUC_MMIO_RELAY_SERVICE_RESPONSE_MSG_0_DATA0, response[0]);
+}
+
+static noinline __noreturn void vf_ggtt_test_hold(struct xe_gt *gt,
+					       const char *stage, int err)
+{
+	DECLARE_COMPLETION_ONSTACK(hold);
+
+	xe_gt_err(gt,
+		  "VFPROBE: %s completion uncertain (%d); holding probe and BO; keep VM and VF assigned\n",
+		  stage, err);
+	/*
+	 * Do not unwind or retry. The still-running probe retains its BO, DMA
+	 * mapping, GGTT node and device infrastructure. No reference-count
+	 * quarantine can substitute for cancelling a queued PF update.
+	 * This completion is deliberately never signalled. Recovery is outside
+	 * this experiment; userspace must not time out and destroy the VM.
+	 */
+	for (;;)
+		wait_for_completion(&hold);
+}
+
+/*
+ * Test the working PF's early relay without installing a memirq buffer.
+ * Restore its initial PRESENT/ownership-only entry before software rollback.
+ * An error after submitting an update cannot be returned to the BO allocator.
+ */
+int xe_gt_sriov_vf_test_ggtt(struct xe_gt *gt, u32 page, u64 pte)
+{
+	u32 response[GUC_MAX_MMIO_MSG_LEN] = {};
+	u32 desc;
+	int ret;
+
+	if (!FIELD_FIT(VF2PF_UPDATE_GGTT32_OFFSET, page))
+		return -ERANGE;
+	desc = FIELD_PREP(VF2PF_UPDATE_GGTT32_OFFSET, page);
+
+	xe_gt_info(gt, "VFPROBE: before MMIO relay handshake ABI 1.0\n");
+	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_HANDSHAKE, 1,
+				 FIELD_PREP(VF2PF_MMIO_HANDSHAKE_REQUEST_MSG_1_MAJOR, 1),
+				 0, 0, response);
+	if (ret || response[1] !=
+	    FIELD_PREP(VF2PF_MMIO_HANDSHAKE_RESPONSE_MSG_1_MAJOR, 1)) {
+		xe_gt_err(gt, "VFPROBE: handshake failed (%d), version=%#x; no PTE submitted\n",
+			  ret, response[1]);
+		return ret < 0 ? ret : -EPROTO;
+	}
+
+	xe_gt_info(gt, "VFPROBE: before PF map, page=%#x pte=%#llx magic=2\n", page, pte);
+	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT, 2,
+				 desc, lower_32_bits(pte), upper_32_bits(pte), response);
+	if (ret != 1)
+		vf_ggtt_test_hold(gt, "map", ret);
+	xe_gt_info(gt, "VFPROBE: PF map acknowledged, count=1\n");
+
+	/* Same ownership-only value used by PF xe_ggtt_assign(), before VFID. */
+	xe_gt_info(gt, "VFPROBE: before PF restore, page=%#x pte=0x1 magic=3\n", page);
+	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT, 3,
+				 desc, 1, 0, response);
+	if (ret != 1)
+		vf_ggtt_test_hold(gt, "restore", ret);
+	xe_gt_info(gt, "VFPROBE: PF restore acknowledged, count=1; BO mapping removed\n");
+	return 0;
 }
 
 static int guc_action_match_version(struct xe_guc *guc,

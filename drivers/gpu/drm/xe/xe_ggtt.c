@@ -8,6 +8,7 @@
 #include <kunit/visibility.h>
 #include <linux/fault-inject.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/pci.h>
 #include <linux/printk.h>
 #include <linux/sizes.h>
 
@@ -25,9 +26,11 @@
 #include "xe_bo.h"
 #include "xe_force_wake.h"
 #include "xe_gt_printk.h"
+#include "xe_gt_sriov_vf.h"
 #include "xe_gt_types.h"
 #include "xe_map.h"
 #include "xe_mmio.h"
+#include "xe_module.h"
 #include "xe_pat.h"
 #include "xe_pm.h"
 #include "xe_res_cursor.h"
@@ -796,8 +799,8 @@ static noinline bool xe_ggtt_vf_probe_stop(struct xe_ggtt *ggtt, struct xe_bo *b
 	return true;
 }
 
-/* Inspect one candidate PTE without touching the GGTT or issuing a relay. */
-static noinline void xe_ggtt_vf_probe_pte(struct xe_ggtt *ggtt, struct xe_bo *bo,
+/* Inspect the first candidate PTE, optionally testing PF map and restore. */
+static noinline int xe_ggtt_vf_probe_pte(struct xe_ggtt *ggtt, struct xe_bo *bo,
 					u64 pte_flags, u16 pat_index)
 {
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
@@ -808,12 +811,12 @@ static noinline void xe_ggtt_vf_probe_pte(struct xe_ggtt *ggtt, struct xe_bo *bo
 
 	if (xe_bo_is_vram(bo) || xe_bo_is_stolen(bo) || !bo->ttm.ttm) {
 		xe_tile_err(ggtt->tile, "VFPROBE: unexpected backing; no PTE inspected\n");
-		return;
+		return -EINVAL;
 	}
 	sg = xe_bo_sg(bo);
 	if (!sg || !sg->sgl) {
 		xe_tile_err(ggtt->tile, "VFPROBE: missing SG table; no PTE inspected\n");
-		return;
+		return -EINVAL;
 	}
 
 	/* Same first system-memory entry calculation as xe_ggtt_map_bo(). */
@@ -822,13 +825,17 @@ static noinline void xe_ggtt_vf_probe_pte(struct xe_ggtt *ggtt, struct xe_bo *bo
 	pte = pte_flags | dma;
 	bar_offset = SZ_8M + (addr >> XE_PTE_SHIFT) * sizeof(u64);
 	xe_tile_err(ggtt->tile,
-		    "VFPROBE: PTE plan only, ggtt=%#llx relative=%#llx dma=%#llx pte=%#llx pat=%u\n",
+		    "VFPROBE: PTE candidate, ggtt=%#llx relative=%#llx dma=%#llx pte=%#llx pat=%u\n",
 		    addr, node->base.start, dma, pte, pat_index);
 	xe_tile_err(ggtt->tile,
 		    "VFPROBE: BAR offset=%#llx size=%zu in_bar=%u writer=%ps\n",
 		    bar_offset, xe->mmio.size, bar_offset + sizeof(u64) <= xe->mmio.size,
 		    ggtt->pt_ops->ggtt_set_pte);
 	dump_stack();
+	if (xe_modparam.mtl_vf_relay_test)
+		return xe_gt_sriov_vf_test_ggtt(ggtt->tile->primary_gt,
+					       node->base.start >> XE_PTE_SHIFT, pte);
+	return -EOPNOTSUPP;
 }
 
 /**
@@ -893,6 +900,12 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 	u64 alignment = bo->min_align > 0 ? bo->min_align : XE_PAGE_SIZE;
 	u8 tile_id = ggtt->tile->id;
 	int err;
+
+	if (probe_plan && xe_modparam.mtl_vf_relay_test &&
+	    to_pci_dev(xe->drm.dev)->is_virtfn) {
+		xe_tile_err(ggtt->tile, "VFPROBE: relay test requires an assigned guest VF\n");
+		return -EOPNOTSUPP;
+	}
 
 	/* This experiment only advances the observed 4 KiB system-memory BO. */
 	if (probe_plan && (xe_bo_size(bo) != XE_PAGE_SIZE ||
@@ -960,14 +973,15 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 		u64 pte = ggtt->pt_ops->pte_encode_flags(bo, pat_index);
 
 		if (probe_plan) {
-			xe_ggtt_vf_probe_pte(ggtt, bo, pte, pat_index);
-			/* No PTE was submitted: undo only the software reservation. */
+			err = xe_ggtt_vf_probe_pte(ggtt, bo, pte, pat_index);
+			/* The helper returns only before map or after confirmed restore. */
 			drm_mm_remove_node(&bo->ggtt_node[tile_id]->base);
 			ggtt_node_fini(bo->ggtt_node[tile_id]);
 			bo->ggtt_node[tile_id] = NULL;
+			xe_tile_info(ggtt->tile,
+				     "VFPROBE: software node removed, relay_test=%u result=%d; stopping probe\n",
+				     xe_modparam.mtl_vf_relay_test, err);
 			err = -EOPNOTSUPP;
-			xe_tile_err(ggtt->tile,
-				    "VFPROBE: unused GGTT node removed; no PTE write or invalidation issued\n");
 		} else {
 			xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
 		}

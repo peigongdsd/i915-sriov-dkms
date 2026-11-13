@@ -13,6 +13,7 @@ struct work_struct;
 /* Module modprobe variables */
 struct xe_modparam {
 	bool probe_display;
+	bool mtl_vf_relay_test;
 	int force_vram_bar_size;
 	int guc_log_level;
 	char *guc_firmware_path;
