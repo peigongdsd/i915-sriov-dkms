@@ -422,6 +422,14 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 		}
 	}
 
+	/* Diagnostic only: stop after VF discovery, before GGTT initialization. */
+	if (IS_SRIOV_VF(xe) && xe->info.platform == XE_METEORLAKE) {
+		drm_err(&xe->drm,
+			"VFPROBE: stop before GGTT setup, base=%#llx size=%#llx\n",
+			ggtt_start, ggtt_size);
+		return -EOPNOTSUPP;
+	}
+
 	ggtt->gsm = ggtt->tile->mmio.regs + SZ_8M;
 
 	/* Match i915 on the MTL/ARL PF when firmware permits direct GSM access. */
