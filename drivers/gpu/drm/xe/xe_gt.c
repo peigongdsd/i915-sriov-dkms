@@ -983,6 +983,12 @@ void xe_gt_reset_async(struct xe_gt *gt)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 
+	if (xe_gt_sriov_vf_bootstrap_test(xe)) {
+		WRITE_ONCE(gt->sriov.vf.test_reset_seen, true);
+		xe_gt_err(gt, "VFPROBE: async reset requested during bootstrap; reset suppressed\n");
+		return;
+	}
+
 	if (xe_device_is_in_reset(xe))
 		return;
 

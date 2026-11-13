@@ -1293,6 +1293,8 @@ static int vf_guc_min_load_for_hwconfig(struct xe_guc *guc)
 	struct xe_gt *gt = guc_to_gt(guc);
 	int ret;
 
+	if (xe_gt_sriov_vf_bootstrap_test(guc_to_xe(guc)))
+		xe_gt_info(gt, "VFPROBE: before hwconfig and CT bootstrap\n");
 	ret = xe_guc_hwconfig_init(guc);
 	if (ret)
 		return ret;
@@ -1301,6 +1303,8 @@ static int vf_guc_min_load_for_hwconfig(struct xe_guc *guc)
 	if (ret)
 		return ret;
 
+	if (xe_gt_sriov_vf_bootstrap_test(guc_to_xe(guc)))
+		xe_gt_info(gt, "VFPROBE: CT enabled; before native PF handshake\n");
 	ret = xe_gt_sriov_vf_connect(gt);
 	if (ret)
 		goto err_out;
@@ -1309,6 +1313,12 @@ static int vf_guc_min_load_for_hwconfig(struct xe_guc *guc)
 	if (ret)
 		goto err_out;
 
+	if (xe_gt_sriov_vf_bootstrap_test(guc_to_xe(guc))) {
+		gt->sriov.vf.test_ct_passed = true;
+		xe_gt_info(gt, "VFPROBE: native CT handshake and runtime query passed; memirq_dispatches=%d\n",
+			   atomic_read(&gt->sriov.vf.test_irqs));
+		return -EOPNOTSUPP;
+	}
 	return 0;
 
 err_out:
@@ -1414,6 +1424,8 @@ int xe_guc_enable_communication(struct xe_guc *guc)
 		struct xe_gt *gt = guc_to_gt(guc);
 		struct xe_tile *tile = gt_to_tile(gt);
 
+		if (xe_gt_sriov_vf_bootstrap_test(xe))
+			xe_gt_info(gt, "VFPROBE: before GuC memirq registration\n");
 		err = xe_memirq_init_guc(&tile->memirq, guc);
 		if (err)
 			return err;
@@ -1421,6 +1433,8 @@ int xe_guc_enable_communication(struct xe_guc *guc)
 		guc_enable_irq(guc);
 	}
 
+	if (xe_gt_sriov_vf_bootstrap_test(xe))
+		xe_gt_info(guc_to_gt(guc), "VFPROBE: before CT registration and enable\n");
 	err = xe_guc_ct_enable(&guc->ct);
 	if (err)
 		return err;

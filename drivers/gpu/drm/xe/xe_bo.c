@@ -1854,6 +1854,8 @@ static void xe_ttm_bo_delete_mem_notify(struct ttm_buffer_object *ttm_bo)
 	if (!xe_bo_is_xe_bo(ttm_bo))
 		return;
 
+	xe_ggtt_vf_bootstrap_unmap_bo(bo);
+
 	if (IS_VF_CCS_READY(ttm_to_xe_device(ttm_bo->bdev)))
 		xe_sriov_vf_ccs_detach_bo(bo);
 

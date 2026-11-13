@@ -6,6 +6,7 @@
 #ifndef _XE_GT_SRIOV_VF_TYPES_H_
 #define _XE_GT_SRIOV_VF_TYPES_H_
 
+#include <linux/atomic.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -87,6 +88,16 @@ struct xe_gt_sriov_vf_migration {
  * struct xe_gt_sriov_vf - GT level VF virtualization data.
  */
 struct xe_gt_sriov_vf {
+	/** @test_irqs: GuC memirq dispatches during the bootstrap experiment. */
+	atomic_t test_irqs;
+	/** @test_reset_seen: A reset/recovery request makes the experiment inconclusive. */
+	bool test_reset_seen;
+	/** @test_relay_ready: Early PF handshake completed, protected by GGTT lock. */
+	bool test_relay_ready;
+	/** @test_magic: Next early relay identifier, protected by GGTT lock. */
+	u8 test_magic;
+	/** @test_ct_passed: Native CT handshake and runtime query completed. */
+	bool test_ct_passed;
 	/** @wanted_guc_version: minimum wanted GuC ABI version. */
 	struct xe_uc_fw_version wanted_guc_version;
 	/** @guc_version: negotiated GuC ABI version. */

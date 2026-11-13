@@ -32,6 +32,7 @@
 #include "xe_lrc.h"
 #include "xe_memirq.h"
 #include "xe_mmio.h"
+#include "xe_module.h"
 #include "xe_sriov.h"
 #include "xe_sriov_vf.h"
 #include "xe_sriov_vf_ccs.h"
@@ -144,7 +145,7 @@ static int vf_test_mmio_relay(struct xe_gt *gt, u8 opcode, u8 magic,
 	return FIELD_GET(VF2GUC_MMIO_RELAY_SERVICE_RESPONSE_MSG_0_DATA0, response[0]);
 }
 
-static noinline __noreturn void vf_ggtt_test_hold(struct xe_gt *gt,
+noinline __noreturn void xe_gt_sriov_vf_test_hold(struct xe_gt *gt,
 					       const char *stage, int err)
 {
 	DECLARE_COMPLETION_ONSTACK(hold);
@@ -193,7 +194,7 @@ int xe_gt_sriov_vf_test_ggtt(struct xe_gt *gt, u32 page, u64 pte)
 	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT, 2,
 				 desc, lower_32_bits(pte), upper_32_bits(pte), response);
 	if (ret != 1)
-		vf_ggtt_test_hold(gt, "map", ret);
+		xe_gt_sriov_vf_test_hold(gt, "map", ret);
 	xe_gt_info(gt, "VFPROBE: PF map acknowledged, count=1\n");
 
 	/* Same ownership-only value used by PF xe_ggtt_assign(), before VFID. */
@@ -201,9 +202,75 @@ int xe_gt_sriov_vf_test_ggtt(struct xe_gt *gt, u32 page, u64 pte)
 	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT, 3,
 				 desc, 1, 0, response);
 	if (ret != 1)
-		vf_ggtt_test_hold(gt, "restore", ret);
+		xe_gt_sriov_vf_test_hold(gt, "restore", ret);
 	xe_gt_info(gt, "VFPROBE: PF restore acknowledged, count=1; BO mapping removed\n");
 	return 0;
+}
+
+bool xe_gt_sriov_vf_bootstrap_test(struct xe_device *xe)
+{
+	return xe_modparam.mtl_vf_bootstrap_test && IS_SRIOV_VF(xe) &&
+	       xe->info.platform == XE_METEORLAKE;
+}
+
+/* Called with the GGTT lock held, before CT is enabled or after quiescence. */
+void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
+				   unsigned int count, bool replicate)
+{
+	struct xe_gt_sriov_vf *vf = &gt->sriov.vf;
+	u32 response[GUC_MAX_MMIO_MSG_LEN] = {};
+	u32 desc;
+	int ret;
+
+	if (READ_ONCE(vf->test_reset_seen) || xe_guc_ct_enabled(&gt->uc.guc.ct))
+		xe_gt_sriov_vf_test_hold(gt, "unexpected reset or active CT during GGTT update",
+					   -EBUSY);
+	if (!count || count > FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1 ||
+	    !FIELD_FIT(VF2PF_UPDATE_GGTT32_OFFSET, page))
+		xe_gt_sriov_vf_test_hold(gt, "invalid GGTT batch", -EINVAL);
+
+	if (!vf->test_relay_ready) {
+		ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_HANDSHAKE,
+					 ++vf->test_magic & 0xf,
+					 FIELD_PREP(VF2PF_MMIO_HANDSHAKE_REQUEST_MSG_1_MAJOR, 1),
+					 0, 0, response);
+		if (ret || response[1] !=
+		    FIELD_PREP(VF2PF_MMIO_HANDSHAKE_RESPONSE_MSG_1_MAJOR, 1))
+			xe_gt_sriov_vf_test_hold(gt, "bootstrap handshake", ret ?: -EPROTO);
+		vf->test_relay_ready = true;
+		xe_gt_info(gt, "VFPROBE: bootstrap MMIO relay ready\n");
+	}
+
+	desc = FIELD_PREP(VF2PF_UPDATE_GGTT32_OFFSET, page) |
+	       FIELD_PREP(VF2PF_UPDATE_GGTT32_COPIES, count - 1) |
+	       FIELD_PREP(VF2PF_UPDATE_GGTT32_MODE,
+			  replicate ? VF2PF_UPDATE_GGTT32_REPLICATE : 0);
+	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT,
+				 ++vf->test_magic & 0xf, desc,
+				 lower_32_bits(pte), upper_32_bits(pte), response);
+	if (ret != count || READ_ONCE(vf->test_reset_seen))
+		xe_gt_sriov_vf_test_hold(gt, "bootstrap GGTT batch", ret);
+}
+
+/* No GGTT update is outstanding: this reset stops consumers, not PF work. */
+void xe_gt_sriov_vf_bootstrap_quiesce(struct xe_gt *gt)
+{
+	u32 request[] = {
+		FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_REQUEST) |
+		FIELD_PREP(GUC_HXG_REQUEST_MSG_0_ACTION, GUC_ACTION_VF2GUC_VF_RESET),
+	};
+	int ret;
+
+	if (READ_ONCE(gt->sriov.vf.test_reset_seen))
+		xe_gt_sriov_vf_test_hold(gt, "asynchronous reset requested", -ECANCELED);
+	xe_guc_ct_disable(&gt->uc.guc.ct);
+	xe_gt_info(gt, "VFPROBE: before bootstrap consumer reset\n");
+	ret = xe_guc_mmio_send_recv_once(&gt->uc.guc, request, ARRAY_SIZE(request), NULL);
+	if (ret)
+		xe_gt_sriov_vf_test_hold(gt, "bootstrap consumer reset", ret);
+	gt->sriov.vf.test_relay_ready = false;
+	xe_gt_info(gt, "VFPROBE: bootstrap consumer reset acknowledged\n");
 }
 
 static int guc_action_match_version(struct xe_guc *guc,
@@ -1027,6 +1094,11 @@ void xe_gt_sriov_vf_migrated_event_handler(struct xe_gt *gt)
 	struct xe_device *xe = gt_to_xe(gt);
 
 	xe_gt_assert(gt, IS_SRIOV_VF(xe));
+	if (xe_gt_sriov_vf_bootstrap_test(xe)) {
+		WRITE_ONCE(gt->sriov.vf.test_reset_seen, true);
+		xe_gt_err(gt, "VFPROBE: migration requested during bootstrap; recovery suppressed\n");
+		return;
+	}
 	xe_gt_assert(gt, xe_gt_sriov_vf_recovery_pending(gt));
 
 	if (!xe_sriov_vf_migration_supported(xe)) {

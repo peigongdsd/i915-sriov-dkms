@@ -21,6 +21,7 @@
 #include "xe_configfs.h"
 #include "xe_device.h"
 #include "xe_drv.h"
+#include "xe_ggtt.h"
 #include "xe_gt.h"
 #include "xe_gt_printk.h"
 #include "xe_gt_sriov_vf.h"
@@ -1291,6 +1292,9 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return err;
 
 	err = xe_device_probe(xe);
+	if (!err && xe_gt_sriov_vf_bootstrap_test(xe))
+		xe_gt_sriov_vf_test_hold(xe->tiles->primary_gt, "unexpected full probe success", 0);
+	xe_ggtt_vf_bootstrap_finish(xe);
 	if (err)
 		return err;
 

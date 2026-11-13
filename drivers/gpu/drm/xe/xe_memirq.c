@@ -13,6 +13,7 @@
 #include "xe_device.h"
 #include "xe_device_types.h"
 #include "xe_gt.h"
+#include "xe_gt_sriov_vf.h"
 #include "xe_guc.h"
 #include "xe_hw_engine.h"
 #include "xe_memirq.h"
@@ -476,6 +477,8 @@ static void memirq_dispatch_guc(struct xe_memirq *memirq, struct iosys_map *stat
 	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_MEMIRQ) &&
 	    !memirq_received(memirq, status, ilog2(GUC_INTR_GUC2HOST), name))
 		memirq_assume_received(memirq, name, ilog2(GUC_INTR_GUC2HOST), "GUC2HOST");
+	if (xe_gt_sriov_vf_bootstrap_test(memirq_to_xe(memirq)))
+		atomic_inc(&guc_to_gt(guc)->sriov.vf.test_irqs);
 	xe_guc_irq_handler(guc, GUC_INTR_GUC2HOST);
 
 	/*

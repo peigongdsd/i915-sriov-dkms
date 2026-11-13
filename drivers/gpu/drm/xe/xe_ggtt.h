@@ -10,8 +10,12 @@
 
 struct drm_printer;
 struct xe_bo;
+struct xe_device;
 struct xe_tile;
 struct drm_exec;
+
+void xe_ggtt_vf_bootstrap_unmap_bo(struct xe_bo *bo);
+void xe_ggtt_vf_bootstrap_finish(struct xe_device *xe);
 
 struct xe_ggtt *xe_ggtt_alloc(struct xe_tile *tile);
 int xe_ggtt_init_early(struct xe_ggtt *ggtt);

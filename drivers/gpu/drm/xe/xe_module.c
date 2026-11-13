@@ -34,6 +34,10 @@ struct xe_modparam xe_modparam = {
 	.xelp_enable_ccs = -1,
 };
 
+module_param_named_unsafe(mtl_vf_bootstrap_test, xe_modparam.mtl_vf_bootstrap_test, bool, 0400);
+MODULE_PARM_DESC(mtl_vf_bootstrap_test,
+		 "Guest-only MTL bootstrap through CT; holds allocations on uncertain completion");
+
 module_param_named_unsafe(mtl_vf_relay_test, xe_modparam.mtl_vf_relay_test, bool, 0400);
 MODULE_PARM_DESC(mtl_vf_relay_test,
 		 "Guest-only MTL single-page relay test; holds probe on uncertain completion");
