@@ -296,11 +296,15 @@ int xe_gt_sriov_vf_bootstrap(struct xe_gt *gt)
 	if (!xe_device_uc_enabled(gt_to_xe(gt)))
 		return -ENODEV;
 
+	xe_gt_info(gt, "VFPROBE: before reset\n");
 	err = vf_reset_guc_state(gt);
+	xe_gt_info(gt, "VFPROBE: reset returned %d\n", err);
 	if (unlikely(err))
 		return err;
 
+	xe_gt_info(gt, "VFPROBE: before version handshake\n");
 	err = vf_handshake_with_guc(gt);
+	xe_gt_info(gt, "VFPROBE: handshake returned %d\n", err);
 	if (unlikely(err))
 		return err;
 
@@ -494,13 +498,19 @@ static int vf_get_ggtt_info(struct xe_gt *gt)
 
 	xe_gt_assert(gt, IS_SRIOV_VF(gt_to_xe(gt)));
 
+	xe_gt_info(gt, "VFPROBE: before GGTT start query\n");
 	err = guc_action_query_single_klv64(guc, GUC_KLV_VF_CFG_GGTT_START_KEY, &start);
+	xe_gt_info(gt, "VFPROBE: GGTT start query returned %d\n", err);
 	if (unlikely(err))
 		return err;
 
+	xe_gt_info(gt, "VFPROBE: before GGTT size query\n");
 	err = guc_action_query_single_klv64(guc, GUC_KLV_VF_CFG_GGTT_SIZE_KEY, &size);
+	xe_gt_info(gt, "VFPROBE: GGTT size query returned %d\n", err);
 	if (unlikely(err))
 		return err;
+
+	xe_gt_info(gt, "VFPROBE: GGTT base=%#llx size=%#llx\n", start, size);
 
 	if (!size)
 		return -ENODATA;

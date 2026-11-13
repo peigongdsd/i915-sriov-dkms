@@ -654,7 +654,9 @@ static int read_gmdid(struct xe_device *xe, enum xe_gmdid_type type, u32 *ver, u
 		if (err)
 			return err;
 
+		xe_gt_info(gt, "VFPROBE: before GMD_ID query\n");
 		val = xe_gt_sriov_vf_gmdid(gt);
+		xe_gt_info(gt, "VFPROBE: GMD_ID query returned %#x\n", val);
 	} else {
 		/*
 		 * GMD_ID is a GT register, but at this point in the driver

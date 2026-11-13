@@ -744,7 +744,9 @@ static int vf_guc_init_noalloc(struct xe_guc *guc)
 	if (err)
 		return err;
 
+	xe_gt_info(gt, "VFPROBE: before VF config query\n");
 	err = xe_gt_sriov_vf_query_config(gt);
+	xe_gt_info(gt, "VFPROBE: VF config query returned %d\n", err);
 	if (err)
 		return err;
 

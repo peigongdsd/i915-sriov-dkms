@@ -39,7 +39,12 @@ const char *xe_sriov_mode_to_string(enum xe_sriov_mode mode)
 
 static bool test_is_vf(struct xe_device *xe)
 {
-	u32 value = xe_mmio_read32(xe_root_tile_mmio(xe), VF_CAP_REG);
+	u32 value;
+
+	drm_info(&xe->drm, "VFPROBE: diagnostic=mtl-stop-v1 before VF_CAP pci_vf=%u\n",
+		 to_pci_dev(xe->drm.dev)->is_virtfn);
+	value = xe_mmio_read32(xe_root_tile_mmio(xe), VF_CAP_REG);
+	drm_info(&xe->drm, "VFPROBE: VF_CAP=%#x\n", value);
 
 	return value & VF_CAP;
 }
