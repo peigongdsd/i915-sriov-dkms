@@ -1179,6 +1179,12 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	void *group;
 	int err;
 
+	/* Host-side VFs are identifiable before accessing their MMIO window. */
+	if (desc->platform == XE_METEORLAKE && pdev->is_virtfn) {
+		dev_err(&pdev->dev, "Native Xe MTL/ARL VF GGTT updates are not supported\n");
+		return -EOPNOTSUPP;
+	}
+
 	subplatform_desc = find_subplatform(desc, pdev->device);
 
 	xe_configfs_check_device(pdev);

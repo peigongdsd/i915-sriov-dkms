@@ -813,6 +813,12 @@ int xe_device_probe_early(struct xe_device *xe)
 
 	xe_sriov_probe_early(xe);
 
+	/* Guest PCI enumeration need not identify an assigned VF as a virtfn. */
+	if (IS_SRIOV_VF(xe) && xe->info.platform == XE_METEORLAKE) {
+		xe_err(xe, "Native Xe MTL/ARL VF GGTT updates are not supported\n");
+		return -EOPNOTSUPP;
+	}
+
 	if (xe_device_is_admin_only(xe) && !IS_SRIOV_PF(xe)) {
 		xe_err(xe, "Can't run Admin-only mode without SR-IOV PF mode!\n");
 		return -ENODEV;
