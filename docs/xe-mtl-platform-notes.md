@@ -22,13 +22,13 @@ establishes a working native VF driver.
 
 | Area | MTL contract in the inspected source | Consequence |
 | --- | --- | --- |
-| Graphics/media IP | The supported direct-GSM path checks graphics 12.70 and media 13.00; IP versions come from GMD_ID. | Do not select register layouts only by a marketing generation. |
+| Graphics/media IP | The direct-GSM path admits graphics 12.70 or 12.71 with media 13.00; IP versions come from GMD_ID. The user's working ThinkBookX driver reports 12.71 / 13.00. | Do not select register layouts only by a marketing generation. Passing this check does not establish firmware permission. |
 | Topology | One logical Xe tile with primary and media GTs. GGTT is shared; GuCs, TLBs, resets and low-level power controls are per GT. | A shared GGTT update needs both affected GTs' invalidation and lifecycle handling. |
 | CPU GGTT access | i915 documents an MTL BAR access hang workaround. Direct GSM access requires firmware permission. | An unavailable direct mapping is not permission to fall back to BAR writes. |
 | VF access | A VF cannot assume access to the PF's physical GSM mapping or privileged GGTT update commands. | A working PF update method does not automatically provide a VF update method. |
 | Memory | MTL is integrated; the Xe descriptor uses a 46-bit DMA mask and 48-bit GPU virtual addresses. | Do not import discrete-GPU local-memory/LMTT assumptions or equate DMA and virtual address widths. |
 | Flat CCS | `mtl_desc` does not enable flat CCS; `lnl_desc` does. | This is a specific feature difference, not evidence of a GGTT hang or absence of all compression on MTL. |
-| VF interrupts | Both baseline and inspected upstream use `GRAPHICS_VERx100 >= 1250` for memory-based interrupts. MTL 1270 satisfies this software predicate. | This is an assumption made by the driver, not validation on this hardware/firmware. Neither working delivery nor absence of support has been demonstrated. |
+| VF interrupts | Both baseline and inspected upstream use `GRAPHICS_VERx100 >= 1250` for memory-based interrupts. MTL 1270 and 1271 satisfy this software predicate. | This is an assumption made by the driver, not validation on this hardware/firmware. Neither working delivery nor absence of support has been demonstrated. |
 | GuC communication | Early MMIO bootstrap and later CT transport are separate stages. | Failure before CT readiness does not mean MTL lacks GuC or CT support. |
 | Display/security | MTL has display and PXP; the baseline explicitly handles media-GT GSC/PXP around VF enablement. | Restrictions on VF display, PCODE and HECI access are not missing platform hardware. |
 
@@ -62,6 +62,16 @@ The baseline Xe PF maps GSM directly when permission is present, but can
 otherwise retain its BAR mapping. This branch rejects SR-IOV PF probe when
 the expected IP/topology, permission, nonzero GSM base or mapping is absent.
 It does not add a GPU binder fallback. Non-SR-IOV probing is unchanged.
+
+The user reported that NixOS generation 203, using `73c7714`, reached stage 2
+and the graphical target despite Xe failing in the initrd with `-95`
+(`EOPNOTSUPP`). That revision admitted only graphics IP 1270. The reported
+1271 / 1300 pair was rejected before reading the GSM permission register;
+its combined error message incorrectly suggested a firmware restriction.
+The corrected check admits both 1270 and 1271 and reports topology, IP and
+firmware rejection separately. This boot does not establish GSM permission
+or successful direct-GSM access. These observations are user-supplied;
+the target journal was not independently inspected here.
 
 xbomber provides a different PF backend using privileged `MI_UPDATE_GTT`
 batches on the existing migration queue. That introduces job/fence and

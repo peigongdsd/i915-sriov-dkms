@@ -10,8 +10,8 @@ The reproduction baseline remains `e9130affe933dfc45309dc7a82599a1d7a38517e`.
 1. Serialize VF GuC MMIO request/reply exchanges using a per-GuC mutex and
    bound firmware RETRY replies to 16 retries. Existing FLR/BUSY handling
    remains in place; no claim is made that RETRY caused the observed hang.
-2. Reject MTL SR-IOV PF probe unless the expected root tile, graphics 12.70,
-   media 13.00 and firmware-permitted direct GSM mapping are available.
+2. Reject MTL SR-IOV PF probe unless the expected root tile, graphics 12.70
+   or 12.71, media 13.00 and firmware-permitted direct GSM mapping are available.
    Never silently substitute the BAR-backed GGTT path in that mode.
 3. Reuse one TLB invalidation issue sequence. Ordinary callers retain their
    cancellation policy; PF relay replies preserve issue and fence failures.
@@ -52,6 +52,9 @@ non-VRAM BOs. Neither observation proves the withdrawn retention safe.
   AddressSanitizer/UndefinedBehaviorSanitizer. Set `CC` if needed.
 - PF tests cover expansion modes, range/overflow rejection, ownership bits,
   PAT retention and rejection before captured writes.
+- GSM admission tests exercise the actual PF check with mocked MMIO and
+  mapping: both 12.70 and 12.71, unsupported IP/topology before permission
+  reads, firmware denial, zero GSM base and mapping failure.
 - TLB tests cover ordinary versus strict cancellation, unrecoverable,
   allocation, I/O and fence errors, using the shared issue implementation.
 - The harness mocks locking, MMIO and fence completion. It does not test

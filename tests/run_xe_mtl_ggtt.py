@@ -12,9 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 XE = ROOT / "drivers/gpu/drm/xe"
 
 
-def function(source, name):
-    pattern = r"^(?:static )?(?:int|void|bool) " + re.escape(name) + r"\("
-    start = re.search(pattern, source, re.MULTILINE).start()
+def block(source, start):
     begin = source.index("{", start)
     depth = 1
     end = begin + 1
@@ -24,7 +22,16 @@ def function(source, name):
     return source[start:end] + "\n"
 
 
-pf = function((XE / "xe_ggtt.c").read_text(), "xe_ggtt_update_vf_ptes")
+def function(source, name):
+    pattern = r"^(?:static )?(?:int|void|bool) " + re.escape(name) + r"\("
+    return block(source, re.search(pattern, source, re.MULTILINE).start())
+
+
+ggtt_source = (XE / "xe_ggtt.c").read_text()
+pf = function(ggtt_source, "xe_ggtt_update_vf_ptes")
+early = function(ggtt_source, "xe_ggtt_init_early")
+gsm = block(early, early.index(
+    "\tif (xe->info.platform == XE_METEORLAKE && IS_SRIOV_PF(xe)) {"))
 tlb_source = (XE / "xe_tlb_inval.c").read_text()
 start = tlb_source.index("#define __xe_tlb_inval_issue(")
 end = tlb_source.index("/**", start)
@@ -38,7 +45,8 @@ with tempfile.TemporaryDirectory(prefix="xe-mtl-test-") as tmp:
     (work / "linux").mkdir()
     (work / "linux/types.h").write_text("/* Types supplied by the harness. */\n")
     (work / "linux/build_bug.h").write_text("#define static_assert _Static_assert\n")
-    for case, functions in (("xe_mtl_ggtt", pf), ("xe_tlb_inval", tlb)):
+    for case, functions in (("xe_mtl_ggtt", pf), ("xe_tlb_inval", tlb),
+                            ("xe_mtl_gsm", gsm)):
         (work / "actual-functions.inc").write_text(functions)
         binary = work / case
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [

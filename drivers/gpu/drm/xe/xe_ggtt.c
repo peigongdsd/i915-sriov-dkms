@@ -427,14 +427,26 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 	/* Match i915 on the MTL/ARL PF when firmware permits direct GSM access. */
 	if (xe->info.platform == XE_METEORLAKE && IS_SRIOV_PF(xe)) {
 		phys_addr_t base;
+		u32 permission;
 
-		if (ggtt->tile != xe_device_get_root_tile(xe) ||
-		    GRAPHICS_VERx100(xe) != 1270 ||
-		    MEDIA_VERx100(xe) != 1300 ||
-		    xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS) !=
-		    STOLEN_ACCESS_ALLOWED) {
+		if (ggtt->tile != xe_device_get_root_tile(xe)) {
 			xe_tile_err(ggtt->tile,
-				    "MTL SR-IOV requires firmware-permitted GSM access\n");
+				    "MTL SR-IOV GSM access requires the root tile\n");
+			return -EOPNOTSUPP;
+		}
+		if ((GRAPHICS_VERx100(xe) != 1270 && GRAPHICS_VERx100(xe) != 1271) ||
+		    MEDIA_VERx100(xe) != 1300) {
+			xe_tile_err(ggtt->tile,
+				    "MTL SR-IOV GSM access unsupported for graphics IP %u, media IP %u\n",
+				    GRAPHICS_VERx100(xe), MEDIA_VERx100(xe));
+			return -EOPNOTSUPP;
+		}
+
+		permission = xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS);
+		if (permission != STOLEN_ACCESS_ALLOWED) {
+			xe_tile_err(ggtt->tile,
+				    "MTL SR-IOV GSM access not permitted by firmware (permission %#x)\n",
+				    permission);
 			return -EOPNOTSUPP;
 		}
 
