@@ -423,6 +423,7 @@ static bool pf_ggtt_gt_current(struct xe_gt *gt, u32 vfid, u32 epoch)
 {
 	return !READ_ONCE(gt->sriov.pf.service.ggtt_stopped) &&
 	       xe_guc_ct_enabled(&gt->uc.guc.ct) &&
+	       gt->uc.guc.submission_state.enabled &&
 	       !xe_gt_sriov_pf_control_flr_in_progress(gt, vfid) &&
 	       epoch == atomic_read(&gt->sriov.pf.service.ggtt_epoch);
 }
@@ -504,6 +505,8 @@ static int pf_update_ggtt(struct xe_gt *gt, u32 vfid,
 	if (media)
 		media_err = xe_tlb_inval_ggtt_sync(&media->tlb_inval);
 
+	if (!xe_gt_sriov_pf_service_ggtt_current(gt, vfid, token))
+		return -ECANCELED;
 	return err ?: media_err ?: updated;
 }
 
