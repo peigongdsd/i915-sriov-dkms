@@ -1,5 +1,8 @@
 # Guest-only MTL VF BO mapping diagnostic, v2
 
+Historical v2 plan. On the v3 branch use the
+[PTE planning and rollback experiment](xe-mtl-vf-pte-plan.md).
+
 Branch: `codex/xe-mtl-vf-map-stop-v2`, based on v1 commit
 `b7cefff4539649ce00ac7dce0397e54d50701885` and ultimately `e9130af`.
 Live identity: `diagnostic=mtl-map-stop-v2`.
