@@ -434,14 +434,6 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 				    "MTL SR-IOV GSM access requires the root tile\n");
 			return -EOPNOTSUPP;
 		}
-		if ((GRAPHICS_VERx100(xe) != 1270 && GRAPHICS_VERx100(xe) != 1271) ||
-		    MEDIA_VERx100(xe) != 1300) {
-			xe_tile_err(ggtt->tile,
-				    "MTL SR-IOV GSM access unsupported for graphics IP %u, media IP %u\n",
-				    GRAPHICS_VERx100(xe), MEDIA_VERx100(xe));
-			return -EOPNOTSUPP;
-		}
-
 		permission = xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS);
 		if (permission != STOLEN_ACCESS_ALLOWED) {
 			xe_tile_err(ggtt->tile,

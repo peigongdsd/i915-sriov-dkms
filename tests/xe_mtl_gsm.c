@@ -100,16 +100,15 @@ int main(void)
 		check(gfx, 1300, true, 0, 0x100000, false, -EOPNOTSUPP,
 		      1, 0, 0, "not permitted by firmware");
 	}
-	check(1274, 1300, true, 1, 0x100000, false, -EOPNOTSUPP,
-	      0, 0, 0, "graphics IP 1274, media IP 1300");
-	check(1271, 1301, true, 1, 0x100000, false, -EOPNOTSUPP,
-	      0, 0, 0, "graphics IP 1271, media IP 1301");
+	/* Common discovery owns IP selection, including absent media support. */
+	check(1274, 1300, true, 1, 0x100000, false, 0, 1, 1, 1, NULL);
+	check(1271, 0, true, 1, 0x100000, false, 0, 1, 1, 1, NULL);
 	check(1271, 1300, false, 1, 0x100000, false, -EOPNOTSUPP,
 	      0, 0, 0, "root tile");
 	check(1271, 1300, true, 2, 0x100000, false, -EOPNOTSUPP,
 	      1, 0, 0, "permission 0x2");
 	check(1271, 1300, true, 1, 0, false, -ENODEV, 1, 1, 0, NULL);
 	check(1271, 1300, true, 1, 0x100000, true, -ENOMEM, 1, 1, 1, NULL);
-	puts("MTL GSM IP admission, permission and mapping tests passed");
+	puts("MTL GSM permission and mapping tests passed");
 	return 0;
 }

@@ -22,7 +22,7 @@ establishes a working native VF driver.
 
 | Area | MTL contract in the inspected source | Consequence |
 | --- | --- | --- |
-| Graphics/media IP | The direct-GSM path admits graphics 12.70 or 12.71 with media 13.00; IP versions come from GMD_ID. The user's working ThinkBookX driver reports 12.71 / 13.00. | Do not select register layouts only by a marketing generation. Passing this check does not establish firmware permission. |
+| Graphics/media IP | Common Xe discovery selects IP descriptors from GMD_ID; the direct-GSM mapping adds no version allowlist. The user's working ThinkBookX driver reports 12.71 / 13.00. | Keep IP selection in the common path. Successful discovery does not establish firmware permission. |
 | Topology | One logical Xe tile with primary and media GTs. GGTT is shared; GuCs, TLBs, resets and low-level power controls are per GT. | A shared GGTT update needs both affected GTs' invalidation and lifecycle handling. |
 | CPU GGTT access | i915 documents an MTL BAR access hang workaround. Direct GSM access requires firmware permission. | An unavailable direct mapping is not permission to fall back to BAR writes. |
 | VF access | A VF cannot assume access to the PF's physical GSM mapping or privileged GGTT update commands. | A working PF update method does not automatically provide a VF update method. |
@@ -60,7 +60,7 @@ restrictions; they are not a captured explanation of this machine's hang.
 
 The baseline Xe PF maps GSM directly when permission is present, but can
 otherwise retain its BAR mapping. This branch rejects SR-IOV PF probe when
-the expected IP/topology, permission, nonzero GSM base or mapping is absent.
+the root-tile requirement, permission, nonzero GSM base or mapping is absent.
 It does not add a GPU binder fallback. Non-SR-IOV probing is unchanged.
 
 The user reported that NixOS generation 203, using `73c7714`, reached stage 2
@@ -68,8 +68,14 @@ and the graphical target despite Xe failing in the initrd with `-95`
 (`EOPNOTSUPP`). That revision admitted only graphics IP 1270. The reported
 1271 / 1300 pair was rejected before reading the GSM permission register;
 its combined error message incorrectly suggested a firmware restriction.
-The corrected check admits both 1270 and 1271 and reports topology, IP and
-firmware rejection separately. This boot does not establish GSM permission
+`02acd04` first widened the check to admit 1271. The subsequent simplification
+removes the graphics/media allowlist entirely: `xe_probe_ips()` already
+requires a recognized graphics descriptor and explicitly allows absent media
+support before GGTT initialization. Direct GSM mapping has no demonstrated
+need for a second IP restriction. Root-tile and firmware failures still have
+distinct diagnostics. Media-13 checks in the relay and invalidation paths
+are separate and unchanged; this is not a claim of support for additional
+VF configurations. This boot does not establish GSM permission
 or successful direct-GSM access. These observations are user-supplied;
 the target journal was not independently inspected here.
 
