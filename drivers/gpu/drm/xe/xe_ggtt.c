@@ -96,8 +96,10 @@ struct xe_ggtt_node {
 	bool invalidate_on_remove;
 	/** @test_mapped: Acknowledged PF mapping owned by the bootstrap test. */
 	bool test_mapped;
-	/** @test_ct_owned: Temporary BO mapped during the CT experiment. */
+	/** @test_ct_owned: BO mapped through CT during the experiment. */
 	bool test_ct_owned;
+	/** @test_temporary: Node whose destruction the experiment waits for. */
+	bool test_temporary;
 };
 
 /**
@@ -141,6 +143,8 @@ struct xe_ggtt {
 	struct xe_bo *scratch;
 	/** @test_used: Bootstrap mappings require quiescence before devres cleanup. */
 	bool test_used;
+	/** @test_scratch_mapped: Scratch backing must survive all GGTT holes. */
+	bool test_scratch_mapped;
 	/** @test_ct_removed: Temporary BO's mapping cleared and node removed. */
 	struct completion test_ct_removed;
 	/** @test_ct_maps: Pages mapped through CT, protected by @lock. */
@@ -286,20 +290,51 @@ static u64 xe_ggtt_get_pte(struct xe_ggtt *ggtt, u64 addr)
 	return readq(&ggtt->gsm[addr >> XE_PTE_SHIFT]);
 }
 
-static void xe_ggtt_clear(struct xe_ggtt *ggtt, u64 start, u64 size)
+static u64 xe_ggtt_scratch_pte(struct xe_ggtt *ggtt)
 {
 	u16 pat_index = xe_cache_pat_idx(tile_to_xe(ggtt->tile), XE_CACHE_WB);
+
+	if (!ggtt->scratch)
+		return 0;
+	return xe_bo_addr(ggtt->scratch, 0, XE_PAGE_SIZE) |
+		ggtt->pt_ops->pte_encode_flags(ggtt->scratch, pat_index);
+}
+
+/* Duplicate one PTE per page; never advance the scratch DMA address. */
+static void vf_bootstrap_fill(struct xe_ggtt *ggtt, u64 start, u64 size, u64 pte)
+{
+	u64 offset;
+	u32 page, left;
+
+	lockdep_assert_held(&ggtt->lock);
+	if (start < ggtt->start || !IS_ALIGNED(start, XE_PAGE_SIZE) ||
+	    !IS_ALIGNED(size, XE_PAGE_SIZE))
+		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "invalid GGTT fill", -EINVAL);
+	offset = start - ggtt->start;
+	if (offset > ggtt->size || size > ggtt->size - offset)
+		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "GGTT fill outside allocation",
+					   -ERANGE);
+	page = offset >> XE_PTE_SHIFT;
+	left = size >> XE_PTE_SHIFT;
+	while (left) {
+		u32 count = min_t(u32, left, FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1);
+
+		xe_gt_sriov_vf_bootstrap_update(ggtt->tile->primary_gt, page, pte, count, false);
+		page += count;
+		left -= count;
+	}
+}
+
+static void xe_ggtt_clear(struct xe_ggtt *ggtt, u64 start, u64 size)
+{
 	u64 end = start + size - 1;
-	u64 scratch_pte;
+	u64 scratch_pte = xe_ggtt_scratch_pte(ggtt);
 
 	xe_tile_assert(ggtt->tile, start < end);
-
-	if (ggtt->scratch)
-		scratch_pte = xe_bo_addr(ggtt->scratch, 0, XE_PAGE_SIZE) |
-			      ggtt->pt_ops->pte_encode_flags(ggtt->scratch,
-							     pat_index);
-	else
-		scratch_pte = 0;
+	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile))) {
+		vf_bootstrap_fill(ggtt, start, size, scratch_pte ?: XE_PAGE_PRESENT);
+		return;
+	}
 
 	while (start < end) {
 		ggtt->pt_ops->ggtt_set_pte(ggtt, start, scratch_pte);
@@ -355,6 +390,9 @@ static void ggtt_fini(void *arg)
 {
 	struct xe_ggtt *ggtt = arg;
 
+	if (ggtt->test_scratch_mapped)
+		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "scratch still mapped at fini",
+					   -EBUSY);
 	ggtt->scratch = NULL;
 }
 
@@ -387,6 +425,7 @@ static void __xe_ggtt_init_early(struct xe_ggtt *ggtt, u64 start, u64 size)
 {
 	ggtt->start = start;
 	ggtt->size = size;
+	init_completion(&ggtt->test_ct_removed);
 	drm_mm_init(&ggtt->mm, 0, size);
 }
 
@@ -503,12 +542,22 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt);
 static void xe_ggtt_initial_clear(struct xe_ggtt *ggtt)
 {
 	struct drm_mm_node *hole;
-	u64 start, end;
+	u64 start, end, pages = 0;
+	bool test = xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile));
 
 	/* Display may have allocated inside ggtt, so be careful with clearing here */
 	mutex_lock(&ggtt->lock);
-	drm_mm_for_each_hole(hole, &ggtt->mm, start, end)
+	if (test) {
+		ggtt->test_used = true;
+		ggtt->test_scratch_mapped = true;
+	}
+	drm_mm_for_each_hole(hole, &ggtt->mm, start, end) {
 		xe_ggtt_clear(ggtt, ggtt->start + start, end - start);
+		pages += (end - start) >> XE_PTE_SHIFT;
+	}
+	if (test)
+		xe_tile_info(ggtt->tile, "VFPROBE: scratch holes acknowledged pages=%llu managed_pages=%llu pte=%#llx\n",
+			     pages, ggtt->size >> XE_PTE_SHIFT, xe_ggtt_scratch_pte(ggtt));
 
 	xe_ggtt_invalidate(ggtt);
 	mutex_unlock(&ggtt->lock);
@@ -518,8 +567,7 @@ static void xe_ggtt_initial_clear(struct xe_ggtt *ggtt)
 static void vf_bootstrap_unmap_node(struct xe_ggtt_node *node)
 {
 	struct xe_ggtt *ggtt = node->ggtt;
-	u32 page = node->base.start >> XE_PTE_SHIFT;
-	u32 left = node->base.size >> XE_PTE_SHIFT;
+	u64 pte = ggtt->test_scratch_mapped ? xe_ggtt_scratch_pte(ggtt) : XE_PAGE_PRESENT;
 
 	lockdep_assert_held(&ggtt->lock);
 	if (!node->test_mapped)
@@ -527,19 +575,13 @@ static void vf_bootstrap_unmap_node(struct xe_ggtt_node *node)
 	if (!node->test_ct_owned && xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct))
 		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
 					   "bootstrap consumer released with CT active", -EBUSY);
-	while (left) {
-		u32 n = min_t(u32, left, FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1);
-
-		xe_gt_sriov_vf_bootstrap_update(ggtt->tile->primary_gt, page,
-					       XE_PAGE_PRESENT, n, false);
-		page += n;
-		left -= n;
-	}
+	vf_bootstrap_fill(ggtt, ggtt->start + node->base.start, node->base.size, pte);
 	node->test_mapped = false;
-	if (node->test_ct_owned) {
+	if (xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct)) {
 		ggtt->test_ct_clears += node->base.size >> XE_PTE_SHIFT;
-		xe_tile_info(ggtt->tile, "VFPROBE: CT clear before TTM backing release relative=%#llx pages=%llu\n",
-			     node->base.start, node->base.size >> XE_PTE_SHIFT);
+		xe_tile_info(ggtt->tile, "VFPROBE: CT clear before TTM backing release relative=%#llx pages=%llu scratch=%u\n",
+			     node->base.start, node->base.size >> XE_PTE_SHIFT,
+			     ggtt->test_scratch_mapped);
 	}
 	xe_tile_info(ggtt->tile, "VFPROBE: unmap acknowledged relative=%#llx pages=%llu\n",
 		     node->base.start, node->base.size >> XE_PTE_SHIFT);
@@ -554,9 +596,14 @@ bool xe_ggtt_vf_bootstrap_bo_mapped(struct xe_bo *bo)
 
 	if (!xe_gt_sriov_vf_bootstrap_test(xe))
 		return false;
-	for_each_tile(tile, xe, id)
+	for_each_tile(tile, xe, id) {
+		struct xe_ggtt *ggtt = tile->mem.ggtt;
+
+		if (ggtt && READ_ONCE(ggtt->scratch) == bo && READ_ONCE(ggtt->test_scratch_mapped))
+			return true;
 		if (bo->ggtt_node[id] && READ_ONCE(bo->ggtt_node[id]->test_mapped))
 			return true;
+	}
 	return false;
 }
 
@@ -571,7 +618,11 @@ void xe_ggtt_vf_bootstrap_unmap_bo(struct xe_bo *bo)
 		return;
 	for_each_tile(tile, xe, id) {
 		struct xe_ggtt_node *node = bo->ggtt_node[id];
+		struct xe_ggtt *ggtt = tile->mem.ggtt;
 
+		if (ggtt && READ_ONCE(ggtt->scratch) == bo && READ_ONCE(ggtt->test_scratch_mapped))
+			xe_gt_sriov_vf_test_hold(tile->primary_gt,
+						   "scratch backing released while mapped", -EBUSY);
 		if (!node || !READ_ONCE(node->test_mapped))
 			continue;
 		scoped_guard(mutex, &node->ggtt->lock)
@@ -598,9 +649,23 @@ void xe_ggtt_vf_bootstrap_finish(struct xe_device *xe)
 		if (tile->media_gt)
 			xe_gt_sriov_vf_bootstrap_quiesce(tile->media_gt);
 		scoped_guard(mutex, &ggtt->lock) {
-			drm_mm_for_each_node(mm, &ggtt->mm)
-				vf_bootstrap_unmap_node(container_of(mm,
-							    struct xe_ggtt_node, base));
+			if (ggtt->test_scratch_mapped) {
+				/* Includes holes and retired nodes that still name scratch. */
+				vf_bootstrap_fill(ggtt, ggtt->start, ggtt->size, XE_PAGE_PRESENT);
+				drm_mm_for_each_node(mm, &ggtt->mm) {
+					struct xe_ggtt_node *node = container_of(mm,
+									 struct xe_ggtt_node, base);
+
+					node->test_mapped = false;
+				}
+				ggtt->test_scratch_mapped = false;
+				xe_tile_info(tile, "VFPROBE: entire managed GGTT cleared before scratch backing release pages=%llu\n",
+					     ggtt->size >> XE_PTE_SHIFT);
+			} else {
+				drm_mm_for_each_node(mm, &ggtt->mm)
+					vf_bootstrap_unmap_node(container_of(mm,
+								    struct xe_ggtt_node, base));
+			}
 		}
 		xe_tile_info(tile, "VFPROBE: all bootstrap GGTT mappings removed before devres cleanup; ct_passed=%u\n",
 			     tile->primary_gt->sriov.vf.test_ct_passed);
@@ -618,7 +683,7 @@ static void ggtt_node_fini(struct xe_ggtt_node *node)
 static void ggtt_node_remove(struct xe_ggtt_node *node)
 {
 	struct xe_ggtt *ggtt = node->ggtt;
-	bool bound, ct_owned = node->test_ct_owned;
+	bool bound, temporary = node->test_temporary;
 
 	mutex_lock(&ggtt->lock);
 	bound = ggtt->flags & XE_GGTT_FLAGS_ONLINE;
@@ -635,7 +700,7 @@ static void ggtt_node_remove(struct xe_ggtt_node *node)
 	mutex_unlock(&ggtt->lock);
 
 	ggtt_node_fini(node);
-	if (ct_owned)
+	if (temporary)
 		complete(&ggtt->test_ct_removed);
 }
 
@@ -686,9 +751,6 @@ int xe_ggtt_init(struct xe_ggtt *ggtt)
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
 	unsigned int flags;
 	int err;
-
-	if (xe_gt_sriov_vf_bootstrap_test(xe))
-		return -EOPNOTSUPP;
 
 	/*
 	 * So we don't need to worry about 64K GGTT layout when dealing with
@@ -864,6 +926,7 @@ int xe_ggtt_vf_ct_test(struct xe_gt *gt)
 	static const u32 pages[] = { 1025, 1 };
 	struct xe_device *xe = gt_to_xe(gt);
 	struct xe_ggtt *ggtt = gt->tile->mem.ggtt;
+	u32 maps, clears;
 	unsigned int i;
 	int err;
 
@@ -871,7 +934,10 @@ int xe_ggtt_vf_ct_test(struct xe_gt *gt)
 	    !xe_guc_ct_enabled(&gt->uc.guc.ct))
 		return -EINVAL;
 
-	init_completion(&ggtt->test_ct_removed);
+	scoped_guard(mutex, &ggtt->lock) {
+		maps = ggtt->test_ct_maps;
+		clears = ggtt->test_ct_clears;
+	}
 	gt->sriov.vf.test_ct_ggtt = true;
 	for (i = 0; i < ARRAY_SIZE(pages); i++) {
 		u32 flags = XE_BO_FLAG_SYSTEM | XE_BO_FLAG_GGTT |
@@ -888,6 +954,7 @@ int xe_ggtt_vf_ct_test(struct xe_gt *gt)
 		if (IS_ERR(bo))
 			xe_gt_sriov_vf_test_hold(gt, "CT BO allocation", PTR_ERR(bo));
 
+		bo->ggtt_node[gt->tile->id]->test_temporary = true;
 		xe_gt_info(gt, "VFPROBE: before ordinary CT BO release case=%u relative=%#llx\n",
 			   i, bo->ggtt_node[gt->tile->id]->base.start);
 		xe_bo_unpin_map_no_vm(bo);
@@ -901,12 +968,12 @@ int xe_ggtt_vf_ct_test(struct xe_gt *gt)
 	if (err || READ_ONCE(gt->sriov.vf.test_reset_seen))
 		xe_gt_sriov_vf_test_hold(gt, "post-CT-map runtime query", err ?: -ECANCELED);
 	scoped_guard(mutex, &ggtt->lock) {
-		if (ggtt->test_ct_maps != 1026 || ggtt->test_ct_clears != 1026)
+		if (ggtt->test_ct_maps - maps != 1026 || ggtt->test_ct_clears - clears != 1026)
 			xe_gt_sriov_vf_test_hold(gt, "CT mapping accounting", -EPROTO);
 	}
-	gt->sriov.vf.test_ct_ggtt = false;
 	xe_gt_info(gt, "VFPROBE: CT GGTT experiment passed maps=%u clears=%u memirq_dispatches=%d\n",
-		   ggtt->test_ct_maps, ggtt->test_ct_clears, atomic_read(&gt->sriov.vf.test_irqs));
+		   ggtt->test_ct_maps - maps, ggtt->test_ct_clears - clears,
+		   atomic_read(&gt->sriov.vf.test_irqs));
 	return 0;
 }
 

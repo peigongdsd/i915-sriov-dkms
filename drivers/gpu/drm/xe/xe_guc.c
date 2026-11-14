@@ -1317,8 +1317,7 @@ static int vf_guc_min_load_for_hwconfig(struct xe_guc *guc)
 		gt->sriov.vf.test_ct_passed = true;
 		xe_gt_info(gt, "VFPROBE: native CT handshake and runtime query passed; memirq_dispatches=%d\n",
 			   atomic_read(&gt->sriov.vf.test_irqs));
-		ret = xe_ggtt_vf_ct_test(gt);
-		return ret ?: -EOPNOTSUPP;
+		gt->sriov.vf.test_ct_ggtt = true;
 	}
 	return 0;
 

@@ -311,6 +311,8 @@ void xe_gt_sriov_vf_bootstrap_quiesce(struct xe_gt *gt)
 
 	if (READ_ONCE(gt->sriov.vf.test_reset_seen))
 		xe_gt_sriov_vf_test_hold(gt, "asynchronous reset requested", -ECANCELED);
+	/* Probe is serialized and every GGTT request has been acknowledged. */
+	gt->sriov.vf.test_ct_ggtt = false;
 	xe_guc_ct_disable(&gt->uc.guc.ct);
 	xe_gt_info(gt, "VFPROBE: before bootstrap consumer reset\n");
 	ret = xe_guc_mmio_send_recv_once(&gt->uc.guc, request, ARRAY_SIZE(request), NULL);
@@ -502,6 +504,12 @@ int xe_gt_sriov_vf_bootstrap(struct xe_gt *gt)
 
 	if (!xe_device_uc_enabled(gt_to_xe(gt)))
 		return -ENODEV;
+
+	if (xe_gt_sriov_vf_bootstrap_test(gt_to_xe(gt)) && gt->sriov.vf.test_ct_passed) {
+		/* Expected post-hwconfig reset, with all mapped backing retained. */
+		xe_gt_sriov_vf_bootstrap_quiesce(gt);
+		return 0;
+	}
 
 	xe_gt_info(gt, "VFPROBE: before reset\n");
 	err = vf_reset_guc_state(gt);

@@ -98,7 +98,7 @@ struct xe_gt_sriov_vf {
 	u8 test_magic;
 	/** @test_ct_passed: Native CT handshake and runtime query completed. */
 	bool test_ct_passed;
-	/** @test_ct_ggtt: CT mapping experiment active; no engine consumes its BOs. */
+	/** @test_ct_ggtt: CT GGTT phase active; reset must explicitly end this phase. */
 	bool test_ct_ggtt;
 	/** @wanted_guc_version: minimum wanted GuC ABI version. */
 	struct xe_uc_fw_version wanted_guc_version;

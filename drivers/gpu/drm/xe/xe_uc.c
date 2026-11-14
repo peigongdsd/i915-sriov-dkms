@@ -7,6 +7,7 @@
 
 #include "xe_assert.h"
 #include "xe_device.h"
+#include "xe_ggtt.h"
 #include "xe_gsc.h"
 #include "xe_gt.h"
 #include "xe_gt_printk.h"
@@ -88,6 +89,33 @@ err:
 	return ret;
 }
 
+/* Reconnect using Xe's normal transport before allowing any submission state. */
+static int vf_uc_scratch_test(struct xe_uc *uc)
+{
+	struct xe_gt *gt = uc_to_gt(uc);
+	int dispatches = atomic_read(&gt->sriov.vf.test_irqs);
+	int err;
+
+	xe_gt_info(gt, "VFPROBE: post-hwconfig reset complete; before CT reconnection\n");
+	err = xe_guc_enable_communication(&uc->guc);
+	if (err)
+		xe_gt_sriov_vf_test_hold(gt, "post-reset CT enable", err);
+	err = xe_gt_sriov_vf_connect(gt);
+	if (err)
+		xe_gt_sriov_vf_test_hold(gt, "post-reset CT handshake", err);
+	err = xe_gt_sriov_vf_query_runtime(gt);
+	if (err || READ_ONCE(gt->sriov.vf.test_reset_seen))
+		xe_gt_sriov_vf_test_hold(gt, "post-reset CT runtime query", err ?: -ECANCELED);
+	xe_gt_info(gt, "VFPROBE: post-reset CT handshake and runtime query passed; memirq_dispatches=%d\n",
+		   atomic_read(&gt->sriov.vf.test_irqs));
+	err = xe_ggtt_vf_ct_test(gt);
+	if (err)
+		xe_gt_sriov_vf_test_hold(gt, "post-reset CT mapping test", err);
+	xe_gt_info(gt, "VFPROBE: scratch and CT reconnection experiment passed; post_reset_memirq_dispatches=%d; stopping before submission init\n",
+		   atomic_read(&gt->sriov.vf.test_irqs) - dispatches);
+	return -EOPNOTSUPP;
+}
+
 /**
  * xe_uc_init_post_hwconfig - init Uc post hwconfig load
  * @uc: The UC object
@@ -105,6 +133,9 @@ int xe_uc_init_post_hwconfig(struct xe_uc *uc)
 	err = xe_uc_sanitize_reset(uc);
 	if (err)
 		return err;
+
+	if (xe_gt_sriov_vf_bootstrap_test(uc_to_xe(uc)))
+		return vf_uc_scratch_test(uc);
 
 	err = xe_guc_init_post_hwconfig(&uc->guc);
 	if (err)
