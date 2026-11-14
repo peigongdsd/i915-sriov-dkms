@@ -84,6 +84,22 @@ struct xe_gt_sriov_vf_migration {
 };
 
 /**
+ * struct xe_gt_sriov_vf_ggtt - Early MMIO GGTT relay state.
+ * @error: sticky protocol error; zero does not establish consumer quiescence.
+ * @magic: last request correlation value, not a reset generation.
+ * @ready: PF relay ABI negotiation completed.
+ *
+ * Protected by the primary GuC's vf_mmio_lock. Zero-initialized with the
+ * device; do not reinitialize to recover an uncertain request. No transport
+ * drain or reset recovery is provided by this state.
+ */
+struct xe_gt_sriov_vf_ggtt {
+	int error;
+	u8 magic;
+	bool ready;
+};
+
+/**
  * struct xe_gt_sriov_vf - GT level VF virtualization data.
  */
 struct xe_gt_sriov_vf {
@@ -97,6 +113,8 @@ struct xe_gt_sriov_vf {
 	struct xe_gt_sriov_vf_runtime runtime;
 	/** @migration: migration data for the VF. */
 	struct xe_gt_sriov_vf_migration migration;
+	/** @ggtt: early GGTT relay state, serialized with GuC MMIO requests. */
+	struct xe_gt_sriov_vf_ggtt ggtt;
 };
 
 #endif

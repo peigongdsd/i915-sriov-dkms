@@ -168,6 +168,7 @@ xe-$(CONFIG_CONFIGFS_FS) += xe_configfs.o
 # graphics virtualization (SR-IOV) support
 xe-y += \
 	xe_gt_sriov_vf.o \
+	xe_gt_sriov_vf_ggtt.o \
 	xe_guc_relay.o \
 	xe_memirq.o \
 	xe_sriov.o \
