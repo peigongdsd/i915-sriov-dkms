@@ -1,5 +1,9 @@
 # MTL VF functional bootstrap experiment, v5.1
 
+Historical v5.1 instructions. On the v6 branch use
+[the CT GGTT experiment](xe-mtl-vf-ct-ggtt-test.md), which records the successful
+v5.1 result and the new stopping point. The v5.1 branch remains frozen.
+
 Branch: `codex/xe-mtl-vf-bootstrap-v5`. The v5.1 follow-up corrects cleanup
 after the v5 run at `43d5e5d`; v4 `70dd8d6` remains the earlier relay baseline.
 Live identity: `diagnostic=mtl-bootstrap-v5.1`.
