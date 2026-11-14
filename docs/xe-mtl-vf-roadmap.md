@@ -12,10 +12,10 @@ Keep platform differences at the GGTT access and early transport boundaries.
 | PF and assigned Windows VF | Reported working | Preserve host generation 204 / PF 02acd04 as the test baseline. |
 | Native guest bootstrap and CT GGTT | V6 reported passed | Memirq delivery, native CT query, temporary mapping/release/reuse and acknowledged cleanup. |
 | Scratch and expected communication reset | V7 implemented, awaiting hardware | Normal hole setup, CT reconnection, post-reset temporary lifetimes, full-range cleanup. |
-| First engine work | Implementation remains | Ordinary default-context WA/NOP jobs with successful fence status and a defined timeout/queue-retirement path. |
-| Complete guest probe | Implementation remains | Primary and media initialization, supported engine classes and DRM render-node registration. |
+| First engine work | V8 full native mode implemented, untested | Ordinary Xe default-context jobs; record wait and fence status without replacing the scheduler. |
+| Complete guest probe | V8 attempts normal full probe, untested | Primary and media initialization and DRM registration; see `xe-mtl-vf-native-test.md`. |
 | Useful guest workload | Not tested | Verify GPU-written results, then a small graphics workload and repeated allocate/submit/release. |
-| Lifecycle and native host VF | Not ready | Failed-probe cleanup, unload, reset/recovery and rebinding; then native host VF tests. |
+| Lifecycle and native host VF | Same V8 implementation, untested | Normal cleanup/reload, workload and recovery evidence in the guest; then bind the host VF with the same path. |
 | Upstream review series | Not ready | Remove experiments, complete error handling, review normal-path cost and document hardware coverage. |
 
 V6's PF acknowledgements and interrupts do not prove engine execution or
@@ -24,7 +24,7 @@ memory-based VF interrupts in Xe; its restricted VF GGTT writes are a separate
 platform characteristic. The original direct-BAR hang remains a strong source
 hypothesis rather than a captured failing instruction.
 
-## Work before an engine experiment
+## Native implementation approach
 
 The normal path calls `xe_uc_sanitize_reset()` again during VF hardware load,
 then enables submission and records default LRCs. Preserve mapped backing and
@@ -32,11 +32,11 @@ refresh transport negotiation across each expected reset. Reuse ordinary Xe
 queue/job creation and completion; check fence error status as well as whether
 the wait completed.
 
-A probe-thread hold alone cannot contain an engine timeout: scheduler work and
-GuC deregistration run asynchronously. Their ownership, backing release and
-consumer-quiescence ordering must be accounted for before enabling submission.
-A successful job also needs its queue retired before clearing mappings. Do not
-add a second submission implementation to avoid this audit.
+V8 uses normal Xe queue lifetime and recovery. It does not add a private queue
+counter, force scheduler threads into holds, change timeouts or pin the device
+awake. The full-probe option selects the PF-mediated GGTT backend while leaving
+the old bootstrap-only diagnostic separate. Test normal workload and cleanup
+with ample diagnostics, then fix concrete failures at their actual boundary.
 
 ## Shape of the eventual review series
 

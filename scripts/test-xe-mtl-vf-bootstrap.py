@@ -153,7 +153,11 @@ static const struct xe_ggtt_pt_ops pt_ops = {encode_scratch, direct_pte};
 #define xe_bo_device(b) (&device)
 #define for_each_tile(t,x,id) for (id=0,t=(x)->tile; id<1; id++)
 #define tile_to_xe(t) (&device)
-#define xe_gt_sriov_vf_bootstrap_test(x) true
+static bool native_mode;
+#define xe_gt_sriov_vf_bootstrap_test(x) (!native_mode)
+#define xe_gt_sriov_vf_native(x) native_mode
+#define xe_gt_sriov_vf_ggtt_relay(x) true
+#define guard(t) __attribute__((unused)) int guard_value = 0; (void)
 #define XE_GGTT_FLAGS_ONLINE 1
 #define XE_BO_FLAG_SYSTEM 1
 #define XE_BO_FLAG_GGTT 2
@@ -628,6 +632,53 @@ int main(void)
     xe_ggtt_vf_bootstrap_finish(&device);
     assert(resets==2 && version_requests==2 && updates==4 && !ggtt.test_scratch_mapped && !node.test_mapped);
     puts("PASS both GT consumers reset and renegotiated before shared GGTT cleanup");
+
+    lifetime_setup(); native_mode=true;
+    gt.sriov.vf.test_ct_passed=gt.sriov.vf.test_ct_ggtt=false;
+    vf_bootstrap_map_bo(&ggtt,&bo,0x20000000000001ULL);
+    assert(ct_requests==1 && !handshakes);
+    puts("PASS native CT mapping uses ordinary enabled CT without diagnostic phases");
+
+    node.test_ct_owned=false;
+    vf_bootstrap_unmap_node(&node);
+    assert(!node.test_mapped && ct_requests==2);
+    puts("PASS native early allocation retires over CT using normal BO lifetime");
+
+    lifetime_setup(); native_mode=true;
+    gt.uc.guc.ct=false; gt.sriov.vf.test_ct_ggtt=true;
+    vf_bootstrap_map_bo(&ggtt,&bo,0x20000000000001ULL);
+    assert(updates==1 && handshakes==1);
+    puts("PASS native MMIO mapping allowed after ordinary CT shutdown");
+
+    lifetime_setup(); native_mode=true;
+    ggtt.scratch=&scratch; ggtt.test_scratch_mapped=true;
+    node.base=(struct drm_mm_node){4096,4096,true}; node.test_mapped=true;
+    pt[1]=0xabc001;
+    ggtt_fini(&ggtt);
+    assert(!ggtt.scratch && !ggtt.test_scratch_mapped && node.test_mapped);
+    for (unsigned i=0;i<4096;i++) assert(pt[i]==(i==1 ? 0xabc001 : 1));
+    puts("PASS native scratch fini clears holes while preserving live CT/BO mapping");
+
+    lifetime_setup(); native_mode=true;
+    ggtt.scratch=&scratch; ggtt.test_scratch_mapped=true;
+    node.base=(struct drm_mm_node){4096,4096,true}; node.test_mapped=false;
+    pt[1]=0xdead001;
+    ggtt_fini(&ggtt);
+    assert(!ggtt.scratch && !ggtt.test_scratch_mapped);
+    for (unsigned i=0;i<4096;i++) assert(pt[i]==1);
+    puts("PASS native scratch fini includes retired nodes awaiting software removal");
+
+    lifetime_setup(); native_mode=true;
+    ggtt.scratch=&scratch; ggtt.test_scratch_mapped=true; ct_fault=1;
+    if (!setjmp(held)) { ggtt_fini(&ggtt); assert(0); }
+    assert(ggtt.scratch==&scratch && ggtt.test_scratch_mapped);
+    puts("PASS lost native scratch clear retains backing rather than freeing live DMA");
+
+    lifetime_setup(); native_mode=true;
+    node.test_mapped=true;
+    xe_ggtt_vf_bootstrap_finish(&device);
+    assert(!resets && !updates && node.test_mapped);
+    puts("PASS native mode never invokes diagnostic whole-range cleanup");
     return 0;
 }
 '''
