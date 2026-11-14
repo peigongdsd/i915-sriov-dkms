@@ -1291,7 +1291,12 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		return err;
 
+	if (xe_gt_sriov_vf_native(xe))
+		xe_info(xe, "VFPROBE: native full probe using PF-mediated GGTT; pci_vf=%u\n",
+			pdev->is_virtfn);
 	err = xe_device_probe(xe);
+	if (xe_gt_sriov_vf_native(xe))
+		xe_info(xe, "VFPROBE: native device probe returned %d\n", err);
 	if (!err && xe_gt_sriov_vf_bootstrap_test(xe))
 		xe_gt_sriov_vf_test_hold(xe->tiles->primary_gt, "unexpected full probe success", 0);
 	xe_ggtt_vf_bootstrap_finish(xe);
@@ -1302,6 +1307,8 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		goto err_driver_cleanup;
 
+	if (xe_gt_sriov_vf_native(xe))
+		xe_info(xe, "VFPROBE: native probe complete; DRM registered and normal PM initialized\n");
 	return 0;
 
 err_driver_cleanup:

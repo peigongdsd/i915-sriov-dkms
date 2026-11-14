@@ -15,6 +15,8 @@ struct xe_reg;
 struct xe_uc_fw_version;
 
 bool xe_gt_sriov_vf_bootstrap_test(struct xe_device *xe);
+bool xe_gt_sriov_vf_native(struct xe_device *xe);
+bool xe_gt_sriov_vf_ggtt_relay(struct xe_device *xe);
 void xe_gt_sriov_vf_test_hold(struct xe_gt *gt, const char *stage, int err) __noreturn;
 void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
 				   unsigned int count, bool replicate);

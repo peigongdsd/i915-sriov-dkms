@@ -94,7 +94,7 @@ struct xe_ggtt_node {
 	struct work_struct delayed_removal_work;
 	/** @invalidate_on_remove: If it needs invalidation upon removal */
 	bool invalidate_on_remove;
-	/** @test_mapped: Acknowledged PF mapping owned by the bootstrap test. */
+	/** @test_mapped: Acknowledged PF mapping; backing must remain until cleared. */
 	bool test_mapped;
 	/** @test_ct_owned: BO mapped through CT during the experiment. */
 	bool test_ct_owned;
@@ -262,7 +262,15 @@ u64 xe_ggtt_size(struct xe_ggtt *ggtt)
 
 static void xe_ggtt_set_pte(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 {
-	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile)))
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile))) {
+		lockdep_assert_held(&ggtt->lock);
+		xe_tile_assert(ggtt->tile, addr >= ggtt->start);
+		xe_gt_sriov_vf_bootstrap_update(ggtt->tile->primary_gt,
+					       (addr - ggtt->start) >> XE_PTE_SHIFT,
+					       pte ?: XE_PAGE_PRESENT, 1, false);
+		return;
+	}
+	if (xe_gt_sriov_vf_ggtt_relay(tile_to_xe(ggtt->tile)))
 		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
 					   "unexpected direct GGTT access", -EOPNOTSUPP);
 
@@ -275,12 +283,13 @@ static void xe_ggtt_set_pte(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 static void xe_ggtt_set_pte_and_flush(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 {
 	xe_ggtt_set_pte(ggtt, addr, pte);
-	ggtt_update_access_counter(ggtt);
+	if (!xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile)))
+		ggtt_update_access_counter(ggtt);
 }
 
 static u64 xe_ggtt_get_pte(struct xe_ggtt *ggtt, u64 addr)
 {
-	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile)))
+	if (xe_gt_sriov_vf_ggtt_relay(tile_to_xe(ggtt->tile)))
 		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
 					   "unexpected direct GGTT access", -EOPNOTSUPP);
 
@@ -331,7 +340,7 @@ static void xe_ggtt_clear(struct xe_ggtt *ggtt, u64 start, u64 size)
 	u64 scratch_pte = xe_ggtt_scratch_pte(ggtt);
 
 	xe_tile_assert(ggtt->tile, start < end);
-	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile))) {
+	if (xe_gt_sriov_vf_ggtt_relay(tile_to_xe(ggtt->tile))) {
 		vf_bootstrap_fill(ggtt, start, size, scratch_pte ?: XE_PAGE_PRESENT);
 		return;
 	}
@@ -390,6 +399,25 @@ static void ggtt_fini(void *arg)
 {
 	struct xe_ggtt *ggtt = arg;
 
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile)) && ggtt->test_scratch_mapped) {
+		struct drm_mm_node *node;
+		u64 start, end;
+
+		guard(mutex)(&ggtt->lock);
+		drm_mm_for_each_hole(node, &ggtt->mm, start, end)
+			vf_bootstrap_fill(ggtt, ggtt->start + start, end - start,
+					  XE_PAGE_PRESENT);
+		/* Unmapped BOs may still have a deferred software node removal. */
+		drm_mm_for_each_node(node, &ggtt->mm) {
+			struct xe_ggtt_node *entry = container_of(node, struct xe_ggtt_node, base);
+
+			if (!entry->test_mapped)
+				vf_bootstrap_fill(ggtt, ggtt->start + node->start,
+						  node->size, XE_PAGE_PRESENT);
+		}
+		ggtt->test_scratch_mapped = false;
+		xe_tile_info(ggtt->tile, "VFPROBE: scratch references cleared at normal GGTT fini\n");
+	}
 	if (ggtt->test_scratch_mapped)
 		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "scratch still mapped at fini",
 					   -EBUSY);
@@ -543,7 +571,7 @@ static void xe_ggtt_initial_clear(struct xe_ggtt *ggtt)
 {
 	struct drm_mm_node *hole;
 	u64 start, end, pages = 0;
-	bool test = xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile));
+	bool test = xe_gt_sriov_vf_ggtt_relay(tile_to_xe(ggtt->tile));
 
 	/* Display may have allocated inside ggtt, so be careful with clearing here */
 	mutex_lock(&ggtt->lock);
@@ -572,7 +600,8 @@ static void vf_bootstrap_unmap_node(struct xe_ggtt_node *node)
 	lockdep_assert_held(&ggtt->lock);
 	if (!node->test_mapped)
 		return;
-	if (!node->test_ct_owned && xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct))
+	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile)) &&
+	    !node->test_ct_owned && xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct))
 		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
 					   "bootstrap consumer released with CT active", -EBUSY);
 	vf_bootstrap_fill(ggtt, ggtt->start + node->base.start, node->base.size, pte);
@@ -594,7 +623,7 @@ bool xe_ggtt_vf_bootstrap_bo_mapped(struct xe_bo *bo)
 	struct xe_tile *tile;
 	u8 id;
 
-	if (!xe_gt_sriov_vf_bootstrap_test(xe))
+	if (!xe_gt_sriov_vf_ggtt_relay(xe))
 		return false;
 	for_each_tile(tile, xe, id) {
 		struct xe_ggtt *ggtt = tile->mem.ggtt;
@@ -614,7 +643,7 @@ void xe_ggtt_vf_bootstrap_unmap_bo(struct xe_bo *bo)
 	struct xe_tile *tile;
 	u8 id;
 
-	if (!xe_gt_sriov_vf_bootstrap_test(xe))
+	if (!xe_gt_sriov_vf_ggtt_relay(xe))
 		return;
 	for_each_tile(tile, xe, id) {
 		struct xe_ggtt_node *node = bo->ggtt_node[id];
@@ -687,7 +716,7 @@ static void ggtt_node_remove(struct xe_ggtt_node *node)
 
 	mutex_lock(&ggtt->lock);
 	bound = ggtt->flags & XE_GGTT_FLAGS_ONLINE;
-	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile))) {
+	if (xe_gt_sriov_vf_ggtt_relay(tile_to_xe(ggtt->tile))) {
 		if (node->test_mapped)
 			xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
 						   "late mapped-node removal", -EBUSY);
@@ -820,7 +849,7 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 	bool use_mmio = IS_SRIOV_PF(xe) && xe->info.platform == XE_METEORLAKE &&
 			MEDIA_VERx100(xe) == 1300;
 
-	if (xe_gt_sriov_vf_bootstrap_test(xe))
+	if (xe_gt_sriov_vf_ggtt_relay(xe))
 		return;
 
 	xe_ggtt_flush_writes(ggtt);
@@ -1032,6 +1061,10 @@ static void xe_ggtt_map_bo(struct xe_ggtt *ggtt, struct xe_ggtt_node *node,
 
 	if (XE_WARN_ON(!node))
 		return;
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile))) {
+		vf_bootstrap_map_bo(ggtt, bo, pte);
+		return;
+	}
 
 	start = xe_ggtt_node_addr(node);
 	end = start + xe_bo_size(bo);
@@ -1185,15 +1218,19 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 				  u64 start, u64 end, struct drm_exec *exec)
 {
 	struct xe_device *xe = tile_to_xe(ggtt->tile);
-	bool bootstrap = xe_gt_sriov_vf_bootstrap_test(xe);
+	bool bootstrap = xe_gt_sriov_vf_ggtt_relay(xe);
 	bool probe_plan = IS_SRIOV_VF(xe) && xe->info.platform == XE_METEORLAKE && !bootstrap;
 	u64 alignment = bo->min_align > 0 ? bo->min_align : XE_PAGE_SIZE;
 	u8 tile_id = ggtt->tile->id;
 	int err;
 
+	if (xe_gt_sriov_vf_native(xe) &&
+	    (xe_modparam.mtl_vf_bootstrap_test || xe_modparam.mtl_vf_relay_test))
+		return -EINVAL;
 	if (bootstrap && xe_modparam.mtl_vf_relay_test)
 		return -EINVAL;
-	if ((bootstrap || (probe_plan && xe_modparam.mtl_vf_relay_test)) &&
+	if ((xe_gt_sriov_vf_bootstrap_test(xe) ||
+	     (probe_plan && xe_modparam.mtl_vf_relay_test)) &&
 	    to_pci_dev(xe->drm.dev)->is_virtfn) {
 		xe_tile_err(ggtt->tile, "VFPROBE: relay test requires an assigned guest VF\n");
 		return -EOPNOTSUPP;

@@ -191,6 +191,9 @@ static int emit_job_sync(struct xe_exec_queue *q, struct xe_bb *bb,
 	xe_sched_job_push(job);
 
 	timeout = dma_fence_wait_timeout(fence, false, timeout_jiffies);
+	if (xe_gt_sriov_vf_native(gt_to_xe(q->gt)))
+		xe_gt_info(q->gt, "VFPROBE: initialization job engine=%s wait=%ld fence_status=%d\n",
+			   q->hwe->name, timeout, dma_fence_get_status(fence));
 	dma_fence_put(fence);
 	if (timeout < 0)
 		return timeout;

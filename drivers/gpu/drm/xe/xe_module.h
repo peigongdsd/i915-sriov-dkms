@@ -15,6 +15,7 @@ struct xe_modparam {
 	bool probe_display;
 	bool mtl_vf_relay_test;
 	bool mtl_vf_bootstrap_test;
+	bool mtl_vf_native;
 	int force_vram_bar_size;
 	int guc_log_level;
 	char *guc_firmware_path;

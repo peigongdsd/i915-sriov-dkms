@@ -96,6 +96,7 @@ static int vf_reset_guc_state(struct xe_gt *gt)
 	struct xe_guc *guc = &gt->uc.guc;
 	int err;
 
+	WRITE_ONCE(gt->sriov.vf.test_relay_ready, false);
 	do {
 		err = guc_action_vf_reset(guc);
 		if (!err || err != -ETIMEDOUT)
@@ -216,6 +217,17 @@ bool xe_gt_sriov_vf_bootstrap_test(struct xe_device *xe)
 	       xe->info.platform == XE_METEORLAKE;
 }
 
+bool xe_gt_sriov_vf_native(struct xe_device *xe)
+{
+	return xe_modparam.mtl_vf_native && IS_SRIOV_VF(xe) &&
+	       xe->info.platform == XE_METEORLAKE;
+}
+
+bool xe_gt_sriov_vf_ggtt_relay(struct xe_device *xe)
+{
+	return xe_gt_sriov_vf_native(xe) || xe_gt_sriov_vf_bootstrap_test(xe);
+}
+
 /* The existing ABI carries the same descriptor/PTE over CT as over MMIO. */
 static void vf_test_ct_ggtt(struct xe_gt *gt, u32 desc, u64 pte, u32 count)
 {
@@ -228,7 +240,8 @@ static void vf_test_ct_ggtt(struct xe_gt *gt, u32 desc, u64 pte, u32 count)
 	u32 response = 0;
 	int ret;
 
-	if (!gt->sriov.vf.test_ct_ggtt || !gt->sriov.vf.test_ct_passed)
+	if (!xe_gt_sriov_vf_native(gt_to_xe(gt)) &&
+	    (!gt->sriov.vf.test_ct_ggtt || !gt->sriov.vf.test_ct_passed))
 		xe_gt_sriov_vf_test_hold(gt, "CT GGTT outside test phase", -EBUSY);
 
 	ret = xe_guc_relay_send_to_pf_once(&gt->uc.guc.relay, request,
@@ -273,7 +286,8 @@ void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
 	       FIELD_PREP(VF2PF_UPDATE_GGTT32_COPIES, count - 1) |
 	       FIELD_PREP(VF2PF_UPDATE_GGTT32_MODE,
 			  replicate ? VF2PF_UPDATE_GGTT32_REPLICATE : 0);
-	if (vf->test_ct_ggtt && !xe_guc_ct_enabled(&gt->uc.guc.ct))
+	if (!xe_gt_sriov_vf_native(gt_to_xe(gt)) &&
+	    vf->test_ct_ggtt && !xe_guc_ct_enabled(&gt->uc.guc.ct))
 		xe_gt_sriov_vf_test_hold(gt, "CT lost during GGTT test", -ENODEV);
 	if (xe_guc_ct_enabled(&gt->uc.guc.ct)) {
 		vf_test_ct_ggtt(gt, desc, pte, count);

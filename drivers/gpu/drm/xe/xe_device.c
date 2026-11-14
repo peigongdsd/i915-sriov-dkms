@@ -1086,6 +1086,9 @@ int xe_device_probe(struct xe_device *xe)
 
 	for_each_gt(gt, xe, id) {
 		err = xe_gt_init(gt);
+		if (xe_gt_sriov_vf_native(xe))
+			xe_gt_info(gt, "VFPROBE: native GT initialization returned %d; memirq_dispatches=%d\n",
+				   err, atomic_read(&gt->sriov.vf.test_irqs));
 		if (err)
 			return err;
 	}
