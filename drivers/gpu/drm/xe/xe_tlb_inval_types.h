@@ -80,6 +80,8 @@ struct xe_tlb_inval {
 	void *private;
 	/** @xe: Pointer to Xe device */
 	struct xe_device *xe;
+	/** @gt_id: Owning GT, used to correlate invalidation diagnostics. */
+	u8 gt_id;
 	/** @ops: TLB invalidation ops */
 	const struct xe_tlb_inval_ops *ops;
 	/** @tlb_inval.seqno: TLB invalidation seqno, protected by CT lock */

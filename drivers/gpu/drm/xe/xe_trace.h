@@ -34,16 +34,18 @@ DECLARE_EVENT_CLASS(xe_tlb_inval_fence,
 			     __string(dev, __dev_name_xe(xe))
 			     __field(struct xe_tlb_inval_fence *, fence)
 			     __field(int, seqno)
+			     __field(u8, gt_id)
 			     ),
 
 		    TP_fast_assign(
 			   __assign_str(dev);
 			   __entry->fence = fence;
 			   __entry->seqno = fence->seqno;
+			   __entry->gt_id = fence->tlb_inval->gt_id;
 			   ),
 
-		    TP_printk("dev=%s, fence=%p, seqno=%d",
-			      __get_str(dev), __entry->fence, __entry->seqno)
+		    TP_printk("dev=%s, gt=%u, fence=%p, seqno=%d",
+			      __get_str(dev), __entry->gt_id, __entry->fence, __entry->seqno)
 );
 
 DEFINE_EVENT(xe_tlb_inval_fence, xe_tlb_inval_fence_send,
@@ -64,6 +66,28 @@ DEFINE_EVENT(xe_tlb_inval_fence, xe_tlb_inval_fence_signal,
 DEFINE_EVENT(xe_tlb_inval_fence, xe_tlb_inval_fence_timeout,
 	     TP_PROTO(struct xe_device *xe, struct xe_tlb_inval_fence *fence),
 	     TP_ARGS(xe, fence)
+);
+
+TRACE_EVENT(xe_sriov_pf_flr,
+	    TP_PROTO(struct xe_gt *gt, u32 vfid, const char *stage),
+	    TP_ARGS(gt, vfid, stage),
+
+	    TP_STRUCT__entry(
+			__string(dev, __dev_name_gt(gt))
+			__field(u8, gt_id)
+			__field(u32, vfid)
+			__string(stage, stage)
+	    ),
+
+	    TP_fast_assign(
+			__assign_str(dev);
+			__entry->gt_id = gt->info.id;
+			__entry->vfid = vfid;
+			__assign_str(stage);
+	    ),
+
+	    TP_printk("dev=%s gt=%u vf=%u stage=%s",
+		      __get_str(dev), __entry->gt_id, __entry->vfid, __get_str(stage))
 );
 
 DECLARE_EVENT_CLASS(xe_exec_queue,

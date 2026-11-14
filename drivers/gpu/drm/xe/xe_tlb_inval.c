@@ -87,8 +87,9 @@ static void xe_tlb_inval_fence_timeout(struct work_struct *work)
 
 		trace_xe_tlb_inval_fence_timeout(xe, fence);
 		drm_err(&xe->drm,
-			"TLB invalidation fence timeout, seqno=%d recv=%d",
-			fence->seqno, tlb_inval->seqno_recv);
+			"TLB invalidation fence timeout, gt=%u seqno=%d recv=%d age_ms=%lld limit_ms=%u\n",
+			tlb_inval->gt_id, fence->seqno, tlb_inval->seqno_recv,
+			since_inval_ms, jiffies_to_msecs(timeout_delay));
 
 		fence->base.error = -ETIME;
 		xe_tlb_inval_fence_signal(fence);
@@ -140,6 +141,7 @@ int xe_gt_tlb_inval_init_early(struct xe_gt *gt)
 	int err;
 
 	tlb_inval->xe = xe;
+	tlb_inval->gt_id = gt->info.id;
 	tlb_inval->seqno = 1;
 	INIT_LIST_HEAD(&tlb_inval->pending_fences);
 	spin_lock_init(&tlb_inval->pending_lock);

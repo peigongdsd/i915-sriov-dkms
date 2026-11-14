@@ -101,6 +101,63 @@ DEFINE_EVENT_PRINT(xe_guc_ctb, xe_guc_ctb_g2h,
 
 );
 
+/* A successful transport return is not a firmware completion. */
+TRACE_EVENT(xe_guc_tlb_inval_request,
+	    TP_PROTO(struct xe_device *xe, u8 gt_id, u32 seqno, u32 action,
+		     u32 data2, u32 len, bool returned, int result),
+	    TP_ARGS(xe, gt_id, seqno, action, data2, len, returned, result),
+
+	    TP_STRUCT__entry(
+			__string(dev, __dev_name_xe(xe))
+			__field(u8, gt_id)
+			__field(u32, seqno)
+			__field(u32, action)
+			__field(u32, data2)
+			__field(u32, len)
+			__field(bool, returned)
+			__field(int, result)
+	    ),
+
+	    TP_fast_assign(
+			__assign_str(dev);
+			__entry->gt_id = gt_id;
+			__entry->seqno = seqno;
+			__entry->action = action;
+			__entry->data2 = data2;
+			__entry->len = len;
+			__entry->returned = returned;
+			__entry->result = result;
+	    ),
+
+	    TP_printk("dev=%s gt=%u seqno=%u action=%#x data2=%#x len=%u stage=%s result=%d",
+		      __get_str(dev), __entry->gt_id, __entry->seqno, __entry->action,
+		      __entry->data2, __entry->len, __entry->returned ? "return" : "begin",
+		      __entry->result)
+);
+
+/* Record every delivered payload before the frontend filters old sequence numbers. */
+TRACE_EVENT(xe_guc_tlb_inval_response,
+	    TP_PROTO(struct xe_device *xe, u8 gt_id, u32 len, u32 seqno),
+	    TP_ARGS(xe, gt_id, len, seqno),
+
+	    TP_STRUCT__entry(
+			__string(dev, __dev_name_xe(xe))
+			__field(u8, gt_id)
+			__field(u32, len)
+			__field(u32, seqno)
+	    ),
+
+	    TP_fast_assign(
+			__assign_str(dev);
+			__entry->gt_id = gt_id;
+			__entry->len = len;
+			__entry->seqno = seqno;
+	    ),
+
+	    TP_printk("dev=%s gt=%u len=%u seqno=%u",
+		      __get_str(dev), __entry->gt_id, __entry->len, __entry->seqno)
+);
+
 TRACE_EVENT(xe_guc_engine_activity,
 	    TP_PROTO(struct xe_device *xe, struct engine_activity *ea, const char *name,
 		     u16 instance),

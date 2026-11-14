@@ -18,6 +18,7 @@
 #include "xe_mmio.h"
 #include "xe_sa.h"
 #include "xe_tlb_inval.h"
+#include "xe_trace_guc.h"
 #include "xe_vm.h"
 
 #include "regs/xe_guc_regs.h"
@@ -31,12 +32,17 @@
 static int send_tlb_inval(struct xe_guc *guc, const u32 *action, int len)
 {
 	struct xe_gt *gt = guc_to_gt(guc);
+	int ret;
 
 	xe_gt_assert(gt, action[1]);	/* Seqno */
 
 	xe_gt_stats_incr(gt, XE_GT_STATS_ID_TLB_INVAL, 1);
-	return xe_guc_ct_send(&guc->ct, action, len,
-			      G2H_LEN_DW_TLB_INVALIDATE, 1);
+	trace_xe_guc_tlb_inval_request(gt_to_xe(gt), gt->info.id, action[1],
+				       action[0], action[2], len, false, 0);
+	ret = xe_guc_ct_send(&guc->ct, action, len, G2H_LEN_DW_TLB_INVALIDATE, 1);
+	trace_xe_guc_tlb_inval_request(gt_to_xe(gt), gt->info.id, action[1],
+				       action[0], action[2], len, true, ret);
+	return ret;
 }
 
 #define MAKE_INVAL_OP_FLUSH(type, flush_cache)	((type << XE_GUC_TLB_INVAL_TYPE_SHIFT) | \
@@ -398,6 +404,8 @@ int xe_guc_tlb_inval_done_handler(struct xe_guc *guc, u32 *msg, u32 len)
 {
 	struct xe_gt *gt = guc_to_gt(guc);
 
+	trace_xe_guc_tlb_inval_response(gt_to_xe(gt), gt->info.id, len,
+					len ? msg[0] : TLB_INVALIDATION_SEQNO_INVALID);
 	if (unlikely(len != 1))
 		return -EPROTO;
 

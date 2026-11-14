@@ -25,6 +25,7 @@
 #include "xe_sriov_pf_migration.h"
 #include "xe_sriov_pf_service.h"
 #include "xe_tile.h"
+#include "xe_trace.h"
 
 static const char *control_cmd_to_string(u32 cmd)
 {
@@ -1565,6 +1566,7 @@ static bool pf_enter_vf_flr_wip(struct xe_gt *gt, unsigned int vfid)
 		return false;
 
 	xe_gt_sriov_pf_service_reset_ggtt(gt, vfid);
+	trace_xe_sriov_pf_flr(gt, vfid, "begin");
 	pf_enter_vf_wip(gt, vfid);
 	return true;
 }
@@ -1588,12 +1590,15 @@ static void pf_exit_vf_flr_wip(struct xe_gt *gt, unsigned int vfid)
 static void pf_enter_vf_flr_completed(struct xe_gt *gt, unsigned int vfid)
 {
 	pf_enter_vf_ready(gt, vfid);
+	trace_xe_sriov_pf_flr(gt, vfid, "complete");
 }
 
 static void pf_enter_vf_flr_failed(struct xe_gt *gt, unsigned int vfid)
 {
-	if (pf_enter_vf_state(gt, vfid, XE_GT_SRIOV_STATE_FLR_FAILED))
+	if (pf_enter_vf_state(gt, vfid, XE_GT_SRIOV_STATE_FLR_FAILED)) {
+		trace_xe_sriov_pf_flr(gt, vfid, "failed");
 		xe_gt_sriov_notice(gt, "VF%u FLR failed!\n", vfid);
+	}
 	pf_exit_vf_wip(gt, vfid);
 }
 
