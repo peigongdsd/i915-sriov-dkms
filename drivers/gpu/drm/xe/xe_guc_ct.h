@@ -64,6 +64,8 @@ xe_guc_ct_send_block(struct xe_guc_ct *ct, const u32 *action, u32 len)
 	return xe_guc_ct_send_recv(ct, action, len, NULL);
 }
 
+int xe_guc_ct_send_block_once(struct xe_guc_ct *ct, const u32 *action, u32 len);
+
 int xe_guc_ct_send_ggtt_reply(struct xe_guc_ct *ct, const u32 *action, u32 len, u32 vfid,
 			      const struct xe_gt_sriov_pf_ggtt_token *token);
 

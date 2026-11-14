@@ -1345,9 +1345,10 @@ static bool retry_failure(struct xe_guc_ct *ct, int ret)
 
 static int guc_ct_send_recv(struct xe_guc_ct *ct, const u32 *action, u32 len,
 			    u32 *response_buffer, bool no_fail, u32 vfid,
-			    const struct xe_gt_sriov_pf_ggtt_token *token)
+			    const struct xe_gt_sriov_pf_ggtt_token *token, bool replay)
 {
 	struct xe_gt *gt = ct_to_gt(ct);
+	unsigned long expires;
 	struct g2h_fence g2h_fence;
 	unsigned int retries = 0;
 	int ret = 0;
@@ -1391,11 +1392,15 @@ retry_same_fence:
 		return ret;
 	}
 
+	expires = jiffies + HZ;
+
 	/* READ_ONCEs pairs with WRITE_ONCEs in parse_g2h_response
 	 * and g2h_fence_cancel.
 	 */
 wait_again:
-	ret = wait_event_timeout(ct->g2h_fence_wq, READ_ONCE(g2h_fence.done), HZ);
+	ret = wait_event_timeout(ct->g2h_fence_wq, READ_ONCE(g2h_fence.done),
+				 replay ? HZ :
+				 time_before(jiffies, expires) ? expires - jiffies : 0);
 	if (!ret) {
 		LNL_FLUSH_WORK(&ct->g2h_worker);
 		if (READ_ONCE(g2h_fence.done)) {
@@ -1421,6 +1426,11 @@ wait_again:
 	}
 
 	if (g2h_fence.wait) {
+		if (!replay && time_after_eq(jiffies, expires)) {
+			xa_erase(&ct->fence_lookup, g2h_fence.seqno);
+			ret = -ETIME;
+			goto unlock;
+		}
 		xe_gt_dbg(gt, "H2G action %#x busy: counter %u\n",
 			  action[0], g2h_fence.counter);
 		/* we can't leave any response data if we want to wait again */
@@ -1432,6 +1442,8 @@ wait_again:
 		xe_gt_dbg(gt, "H2G action %#x retrying: reason %#x\n",
 			  action[0], g2h_fence.reason);
 		mutex_unlock(&ct->lock);
+		if (!replay)
+			return -EAGAIN;
 		if (++retries > GUC_SEND_RETRY_LIMIT) {
 			xe_gt_err(gt, "H2G action %#x reached retry limit=%u, aborting\n",
 				  action[0], GUC_SEND_RETRY_LIMIT);
@@ -1482,20 +1494,37 @@ int xe_guc_ct_send_recv(struct xe_guc_ct *ct, const u32 *action, u32 len,
 			u32 *response_buffer)
 {
 	KUNIT_STATIC_STUB_REDIRECT(xe_guc_ct_send_recv, ct, action, len, response_buffer);
-	return guc_ct_send_recv(ct, action, len, response_buffer, false, 0, NULL);
+	return guc_ct_send_recv(ct, action, len, response_buffer, false, 0, NULL, true);
 }
 ALLOW_ERROR_INJECTION(xe_guc_ct_send_recv, ERRNO);
+
+/**
+ * xe_guc_ct_send_block_once - Submit one CT request without firmware-requested replay
+ * @ct: GuC CT channel
+ * @action: request dwords
+ * @len: request length
+ *
+ * Ring-space and allocation waits before submission retain the common CT path.
+ * GuC RETRY returns -EAGAIN; BUSY waits share a one-second deadline. An error
+ * does not cancel a submitted action or establish that its effects have drained.
+ *
+ * Return: GuC response DATA0, or a negative error.
+ */
+int xe_guc_ct_send_block_once(struct xe_guc_ct *ct, const u32 *action, u32 len)
+{
+	return guc_ct_send_recv(ct, action, len, NULL, false, 0, NULL, false);
+}
 
 int xe_guc_ct_send_recv_no_fail(struct xe_guc_ct *ct, const u32 *action,
 				u32 len, u32 *response_buffer)
 {
-	return guc_ct_send_recv(ct, action, len, response_buffer, true, 0, NULL);
+	return guc_ct_send_recv(ct, action, len, response_buffer, true, 0, NULL, true);
 }
 
 int xe_guc_ct_send_ggtt_reply(struct xe_guc_ct *ct, const u32 *action, u32 len, u32 vfid,
 			      const struct xe_gt_sriov_pf_ggtt_token *token)
 {
-	return guc_ct_send_recv(ct, action, len, NULL, false, vfid, token);
+	return guc_ct_send_recv(ct, action, len, NULL, false, vfid, token, true);
 }
 
 static u32 *msg_to_hxg(u32 *msg)
