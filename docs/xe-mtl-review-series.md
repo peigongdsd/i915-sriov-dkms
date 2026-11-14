@@ -1,5 +1,9 @@
 # Meteor Lake SR-IOV: review series
 
+This document describes the frozen PF review series at `707c15cae538`.
+The later [guest-first range backend](xe-mtl-vf-range-status.md) is a
+preparatory extension with separate validation and limitations.
+
 This is a review candidate for the **PF/VFIO foundation**, with normal native
 Xe VF probing still rejected. It is not a finished native VF driver or a
 drop-in upstream submission. The separate v5.1 experiment has now completed
