@@ -194,6 +194,9 @@ struct relay_transaction {
 	 */
 	int reply;
 
+	/** @no_retry: Do not replay an outgoing request at either protocol layer. */
+	bool no_retry;
+
 	/** @done: completion of the outgoing transaction. */
 	struct completion done;
 
@@ -247,6 +250,7 @@ __relay_get_transaction(struct xe_guc_relay *relay, bool incoming, u32 remote, u
 		return ERR_PTR(-ENOMEM);
 
 	txn->incoming = incoming;
+	txn->no_retry = false;
 	txn->ggtt_update = false;
 	txn->remote = remote;
 	txn->rid = rid;
@@ -321,6 +325,8 @@ static int relay_send_transaction(struct xe_guc_relay *relay, struct relay_trans
 		guard(xe_pm_runtime)(relay_to_xe(relay));
 		ret = xe_guc_ct_send_ggtt_reply(relay_to_ct(relay), buf, len + txn->offset,
 						txn->remote, &txn->ggtt_token);
+	} else if (txn->no_retry) {
+		ret = xe_guc_ct_send_block_once(relay_to_ct(relay), buf, len + txn->offset);
 	} else {
 		ret = xe_guc_ct_send_block(relay_to_ct(relay), buf, len + txn->offset);
 	}
@@ -591,6 +597,82 @@ int xe_guc_relay_send_to_pf(struct xe_guc_relay *relay,
 	relay_assert(relay, IS_SRIOV_VF(relay_to_xe(relay)));
 
 	return relay_send_to(relay, PFID, msg, len, buf, buf_size);
+}
+
+/**
+ * xe_guc_relay_send_to_pf_once - Send one VF request without automatic replay
+ * @relay: VF relay
+ * @msg: inner HXG request
+ * @len: request length in dwords
+ * @buf: response storage
+ * @buf_size: response capacity in dwords
+ *
+ * Reuse Xe's transaction allocation, RID matching and CT transport. Neither
+ * GuC nor PF RETRY replays this request. PF BUSY shares one bounded response
+ * wait. An error leaves completion uncertain; the caller must retain resources
+ * until it can independently establish that no pending update can use them.
+ *
+ * Return: response length, or a negative error.
+ */
+int xe_guc_relay_send_to_pf_once(struct xe_guc_relay *relay,
+				 const u32 *msg, u32 len, u32 *buf, u32 buf_size)
+{
+	struct relay_transaction *txn;
+	unsigned long expires, remaining;
+	int ret;
+
+	relay_assert(relay, IS_SRIOV_VF(relay_to_xe(relay)));
+	if (!len || len > GUC_RELAY_MSG_MAX_LEN || !buf || !buf_size ||
+	    buf_size > GUC_RELAY_MSG_MAX_LEN ||
+	    FIELD_GET(GUC_HXG_MSG_0_ORIGIN, msg[0]) != GUC_HXG_ORIGIN_HOST ||
+	    FIELD_GET(GUC_HXG_MSG_0_TYPE, msg[0]) != GUC_HXG_TYPE_REQUEST)
+		return -EINVAL;
+
+	txn = relay_new_transaction(relay, PFID, msg, len, buf, buf_size);
+	if (IS_ERR(txn))
+		return PTR_ERR(txn);
+	txn->no_retry = true;
+	spin_lock(&relay->lock);
+	list_add_tail(&txn->link, &relay->pending_relays);
+	spin_unlock(&relay->lock);
+
+	ret = relay_send_transaction(relay, txn);
+	if (ret < 0)
+		goto unlink;
+
+	expires = jiffies + msecs_to_jiffies(RELAY_TIMEOUT_MSEC);
+	for (;;) {
+		bool pending;
+
+		remaining = time_before(jiffies, expires) ? expires - jiffies : 0;
+		wait_for_completion_timeout(&txn->done, remaining);
+		/* Consume BUSY under the same lock as the completion producer. */
+		spin_lock(&relay->lock);
+		ret = txn->reply;
+		pending = ret == -EBUSY || ret == -ENOMSG;
+		if (!ret)
+			ret = txn->response_len;
+		else if (ret > 0)
+			ret = from_relay_error(ret);
+		else if (ret == -EBUSY) {
+			txn->reply = -ENOMSG;
+			reinit_completion(&txn->done);
+		}
+		spin_unlock(&relay->lock);
+
+		if (!pending)
+			break;
+		if (time_after_eq(jiffies, expires)) {
+			ret = -ETIME;
+			break;
+		}
+	}
+unlink:
+	spin_lock(&relay->lock);
+	list_del_init(&txn->link);
+	spin_unlock(&relay->lock);
+	relay_release_transaction(relay, txn);
+	return ret;
 }
 
 static int relay_handle_reply(struct xe_guc_relay *relay, u32 origin,
