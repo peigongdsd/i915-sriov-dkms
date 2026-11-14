@@ -6,6 +6,7 @@
 #include "xe_ggtt.h"
 
 #include <kunit/visibility.h>
+#include <linux/completion.h>
 #include <linux/fault-inject.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/pci.h>
@@ -28,6 +29,7 @@
 #include "xe_gt_printk.h"
 #include "xe_gt_sriov_vf.h"
 #include "xe_gt_types.h"
+#include "xe_guc_ct.h"
 #include "xe_map.h"
 #include "xe_mmio.h"
 #include "xe_module.h"
@@ -94,6 +96,8 @@ struct xe_ggtt_node {
 	bool invalidate_on_remove;
 	/** @test_mapped: Acknowledged PF mapping owned by the bootstrap test. */
 	bool test_mapped;
+	/** @test_ct_owned: Temporary BO mapped during the CT experiment. */
+	bool test_ct_owned;
 };
 
 /**
@@ -137,6 +141,12 @@ struct xe_ggtt {
 	struct xe_bo *scratch;
 	/** @test_used: Bootstrap mappings require quiescence before devres cleanup. */
 	bool test_used;
+	/** @test_ct_removed: Temporary BO's mapping cleared and node removed. */
+	struct completion test_ct_removed;
+	/** @test_ct_maps: Pages mapped through CT, protected by @lock. */
+	u32 test_ct_maps;
+	/** @test_ct_clears: Pages cleared through CT, protected by @lock. */
+	u32 test_ct_clears;
 	/** @lock: Mutex lock to protect GGTT data */
 	struct mutex lock;
 	/**
@@ -514,6 +524,9 @@ static void vf_bootstrap_unmap_node(struct xe_ggtt_node *node)
 	lockdep_assert_held(&ggtt->lock);
 	if (!node->test_mapped)
 		return;
+	if (!node->test_ct_owned && xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct))
+		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
+					   "bootstrap consumer released with CT active", -EBUSY);
 	while (left) {
 		u32 n = min_t(u32, left, FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1);
 
@@ -523,8 +536,28 @@ static void vf_bootstrap_unmap_node(struct xe_ggtt_node *node)
 		left -= n;
 	}
 	node->test_mapped = false;
+	if (node->test_ct_owned) {
+		ggtt->test_ct_clears += node->base.size >> XE_PTE_SHIFT;
+		xe_tile_info(ggtt->tile, "VFPROBE: CT clear before TTM backing release relative=%#llx pages=%llu\n",
+			     node->base.start, node->base.size >> XE_PTE_SHIFT);
+	}
 	xe_tile_info(ggtt->tile, "VFPROBE: unmap acknowledged relative=%#llx pages=%llu\n",
 		     node->base.start, node->base.size >> XE_PTE_SHIFT);
+}
+
+/* BO reservation held by the TTM eviction/shrinker caller. */
+bool xe_ggtt_vf_bootstrap_bo_mapped(struct xe_bo *bo)
+{
+	struct xe_device *xe = xe_bo_device(bo);
+	struct xe_tile *tile;
+	u8 id;
+
+	if (!xe_gt_sriov_vf_bootstrap_test(xe))
+		return false;
+	for_each_tile(tile, xe, id)
+		if (bo->ggtt_node[id] && READ_ONCE(bo->ggtt_node[id]->test_mapped))
+			return true;
+	return false;
 }
 
 /* TTM calls this before destroying the DMA backing, not in bo->destroy(). */
@@ -585,7 +618,7 @@ static void ggtt_node_fini(struct xe_ggtt_node *node)
 static void ggtt_node_remove(struct xe_ggtt_node *node)
 {
 	struct xe_ggtt *ggtt = node->ggtt;
-	bool bound;
+	bool bound, ct_owned = node->test_ct_owned;
 
 	mutex_lock(&ggtt->lock);
 	bound = ggtt->flags & XE_GGTT_FLAGS_ONLINE;
@@ -602,6 +635,8 @@ static void ggtt_node_remove(struct xe_ggtt_node *node)
 	mutex_unlock(&ggtt->lock);
 
 	ggtt_node_fini(node);
+	if (ct_owned)
+		complete(&ggtt->test_ct_removed);
 }
 
 static void ggtt_node_remove_work_func(struct work_struct *work)
@@ -823,6 +858,58 @@ size_t xe_ggtt_node_pt_size(const struct xe_ggtt_node *node)
 	return node->base.size / XE_PAGE_SIZE * sizeof(u64);
 }
 
+/* No engine or firmware consumer is given either temporary BO's address. */
+int xe_ggtt_vf_ct_test(struct xe_gt *gt)
+{
+	static const u32 pages[] = { 1025, 1 };
+	struct xe_device *xe = gt_to_xe(gt);
+	struct xe_ggtt *ggtt = gt->tile->mem.ggtt;
+	unsigned int i;
+	int err;
+
+	if (gt != gt->tile->primary_gt || !gt->sriov.vf.test_ct_passed ||
+	    !xe_guc_ct_enabled(&gt->uc.guc.ct))
+		return -EINVAL;
+
+	init_completion(&ggtt->test_ct_removed);
+	gt->sriov.vf.test_ct_ggtt = true;
+	for (i = 0; i < ARRAY_SIZE(pages); i++) {
+		u32 flags = XE_BO_FLAG_SYSTEM | XE_BO_FLAG_GGTT |
+			    XE_BO_FLAG_GGTT_INVALIDATE | XE_BO_FLAG_NEEDS_CPU_ACCESS;
+		struct xe_bo *bo;
+
+		/* Exercise Xe's ordinary WB and UC PAT selection. */
+		if (i)
+			flags |= XE_BO_FLAG_NEEDS_UC;
+		reinit_completion(&ggtt->test_ct_removed);
+		xe_gt_info(gt, "VFPROBE: before CT BO allocation case=%u pages=%u\n", i, pages[i]);
+		bo = xe_bo_create_pin_map_novm(xe, gt->tile, (size_t)pages[i] * XE_PAGE_SIZE,
+					      ttm_bo_type_kernel, flags, false);
+		if (IS_ERR(bo))
+			xe_gt_sriov_vf_test_hold(gt, "CT BO allocation", PTR_ERR(bo));
+
+		xe_gt_info(gt, "VFPROBE: before ordinary CT BO release case=%u relative=%#llx\n",
+			   i, bo->ggtt_node[gt->tile->id]->base.start);
+		xe_bo_unpin_map_no_vm(bo);
+		/* TTM may defer destruction; do not transition CT underneath it. */
+		if (!wait_for_completion_timeout(&ggtt->test_ct_removed, 10 * HZ))
+			xe_gt_sriov_vf_test_hold(gt, "CT BO removal", -ETIME);
+		xe_gt_info(gt, "VFPROBE: CT BO node removed case=%u\n", i);
+	}
+
+	err = xe_gt_sriov_vf_query_runtime(gt);
+	if (err || READ_ONCE(gt->sriov.vf.test_reset_seen))
+		xe_gt_sriov_vf_test_hold(gt, "post-CT-map runtime query", err ?: -ECANCELED);
+	scoped_guard(mutex, &ggtt->lock) {
+		if (ggtt->test_ct_maps != 1026 || ggtt->test_ct_clears != 1026)
+			xe_gt_sriov_vf_test_hold(gt, "CT mapping accounting", -EPROTO);
+	}
+	gt->sriov.vf.test_ct_ggtt = false;
+	xe_gt_info(gt, "VFPROBE: CT GGTT experiment passed maps=%u clears=%u memirq_dispatches=%d\n",
+		   ggtt->test_ct_maps, ggtt->test_ct_clears, atomic_read(&gt->sriov.vf.test_irqs));
+	return 0;
+}
+
 static void vf_bootstrap_map_bo(struct xe_ggtt *ggtt, struct xe_bo *bo, u64 flags)
 {
 	struct xe_ggtt_node *node = bo->ggtt_node[ggtt->tile->id];
@@ -855,6 +942,9 @@ static void vf_bootstrap_map_bo(struct xe_ggtt *ggtt, struct xe_bo *bo, u64 flag
 		requests++;
 	}
 	node->test_mapped = true;
+	node->test_ct_owned = xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct);
+	if (node->test_ct_owned)
+		ggtt->test_ct_maps += xe_bo_size(bo) >> XE_PTE_SHIFT;
 	xe_tile_info(ggtt->tile,
 		     "VFPROBE: map acknowledged relative=%#llx pages=%zu requests=%u\n",
 		     node->base.start, xe_bo_size(bo) >> XE_PTE_SHIFT, requests);

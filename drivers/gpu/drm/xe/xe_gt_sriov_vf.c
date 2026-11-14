@@ -16,6 +16,7 @@
 #include "abi/guc_klvs_abi.h"
 #include "abi/guc_relay_actions_abi.h"
 #include "regs/xe_gt_regs.h"
+#include "regs/xe_gtt_defs.h"
 
 #include "xe_assert.h"
 #include "xe_device.h"
@@ -215,7 +216,35 @@ bool xe_gt_sriov_vf_bootstrap_test(struct xe_device *xe)
 	       xe->info.platform == XE_METEORLAKE;
 }
 
-/* Called with the GGTT lock held, before CT is enabled or after quiescence. */
+/* The existing ABI carries the same descriptor/PTE over CT as over MMIO. */
+static void vf_test_ct_ggtt(struct xe_gt *gt, u32 desc, u64 pte, u32 count)
+{
+	u32 request[] = {
+		FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_REQUEST) |
+		FIELD_PREP(GUC_HXG_REQUEST_MSG_0_ACTION, GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32),
+		desc, lower_32_bits(pte), upper_32_bits(pte),
+	};
+	u32 response = 0;
+	int ret;
+
+	if (!gt->sriov.vf.test_ct_ggtt || !gt->sriov.vf.test_ct_passed)
+		xe_gt_sriov_vf_test_hold(gt, "CT GGTT outside test phase", -EBUSY);
+
+	ret = xe_guc_relay_send_to_pf_once(&gt->uc.guc.relay, request,
+					 ARRAY_SIZE(request), &response, 1);
+	if (ret != 1 ||
+	    FIELD_GET(GUC_HXG_MSG_0_ORIGIN, response) != GUC_HXG_ORIGIN_HOST ||
+	    FIELD_GET(GUC_HXG_MSG_0_TYPE, response) != GUC_HXG_TYPE_RESPONSE_SUCCESS ||
+	    FIELD_GET(GUC_HXG_RESPONSE_MSG_0_DATA0, response) != count ||
+	    READ_ONCE(gt->sriov.vf.test_reset_seen))
+		xe_gt_sriov_vf_test_hold(gt, "CT GGTT batch", ret < 0 ? ret : -EPROTO);
+	xe_gt_info(gt, "VFPROBE: CT GGTT acknowledged page=%#x pages=%u replicate=%u\n",
+		   (u32)FIELD_GET(VF2PF_UPDATE_GGTT32_OFFSET, desc), count,
+		   (u32)FIELD_GET(VF2PF_UPDATE_GGTT32_MODE, desc));
+}
+
+/* Called with the GGTT lock held throughout each request and acknowledgment. */
 void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
 				   unsigned int count, bool replicate)
 {
@@ -224,12 +253,32 @@ void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
 	u32 desc;
 	int ret;
 
-	if (READ_ONCE(vf->test_reset_seen) || xe_guc_ct_enabled(&gt->uc.guc.ct))
-		xe_gt_sriov_vf_test_hold(gt, "unexpected reset or active CT during GGTT update",
+	if (READ_ONCE(vf->test_reset_seen))
+		xe_gt_sriov_vf_test_hold(gt, "unexpected reset during GGTT update",
 					   -EBUSY);
 	if (!count || count > FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1 ||
 	    !FIELD_FIT(VF2PF_UPDATE_GGTT32_OFFSET, page))
 		xe_gt_sriov_vf_test_hold(gt, "invalid GGTT batch", -EINVAL);
+
+	if ((u64)page + count > xe_tile_sriov_vf_ggtt(gt->tile) / SZ_4K ||
+	    (u64)page + count > (u64)FIELD_MAX(VF2PF_UPDATE_GGTT32_OFFSET) + 1 ||
+	    !(pte & XE_PAGE_PRESENT) ||
+	    pte & ~(GENMASK_ULL(45, 12) | XELPG_GGTT_PTE_PAT0 |
+		    XELPG_GGTT_PTE_PAT1 | XE_PAGE_PRESENT) ||
+	    (replicate && (u64)(count - 1) * SZ_4K >
+	     GENMASK_ULL(45, 12) - (pte & GENMASK_ULL(45, 12))))
+		xe_gt_sriov_vf_test_hold(gt, "invalid GGTT range or PTE", -ERANGE);
+
+	desc = FIELD_PREP(VF2PF_UPDATE_GGTT32_OFFSET, page) |
+	       FIELD_PREP(VF2PF_UPDATE_GGTT32_COPIES, count - 1) |
+	       FIELD_PREP(VF2PF_UPDATE_GGTT32_MODE,
+			  replicate ? VF2PF_UPDATE_GGTT32_REPLICATE : 0);
+	if (vf->test_ct_ggtt && !xe_guc_ct_enabled(&gt->uc.guc.ct))
+		xe_gt_sriov_vf_test_hold(gt, "CT lost during GGTT test", -ENODEV);
+	if (xe_guc_ct_enabled(&gt->uc.guc.ct)) {
+		vf_test_ct_ggtt(gt, desc, pte, count);
+		return;
+	}
 
 	if (!vf->test_relay_ready) {
 		ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_HANDSHAKE,
@@ -243,10 +292,6 @@ void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
 		xe_gt_info(gt, "VFPROBE: bootstrap MMIO relay ready\n");
 	}
 
-	desc = FIELD_PREP(VF2PF_UPDATE_GGTT32_OFFSET, page) |
-	       FIELD_PREP(VF2PF_UPDATE_GGTT32_COPIES, count - 1) |
-	       FIELD_PREP(VF2PF_UPDATE_GGTT32_MODE,
-			  replicate ? VF2PF_UPDATE_GGTT32_REPLICATE : 0);
 	ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT,
 				 ++vf->test_magic & 0xf, desc,
 				 lower_32_bits(pte), upper_32_bits(pte), response);

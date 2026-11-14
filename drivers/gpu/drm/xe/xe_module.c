@@ -36,7 +36,7 @@ struct xe_modparam xe_modparam = {
 
 module_param_named_unsafe(mtl_vf_bootstrap_test, xe_modparam.mtl_vf_bootstrap_test, bool, 0400);
 MODULE_PARM_DESC(mtl_vf_bootstrap_test,
-		 "Guest-only MTL bootstrap through CT; holds allocations on uncertain completion");
+		 "Guest-only MTL bootstrap and CT GGTT test; holds allocations on uncertain completion");
 
 module_param_named_unsafe(mtl_vf_relay_test, xe_modparam.mtl_vf_relay_test, bool, 0400);
 MODULE_PARM_DESC(mtl_vf_relay_test,
