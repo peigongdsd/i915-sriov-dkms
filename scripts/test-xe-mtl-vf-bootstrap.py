@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Compile actual v5 batching/relay/clear helpers with fake DMA and PF replies.
+"""Compile actual diagnostic batching/relay/clear helpers with fake DMA and PF replies.
 
 These tests exercise bounds, encoding and failure decisions, not device DMA,
 firmware reset ordering, IRQ delivery or the kernel's TTM/devres integration.
@@ -30,6 +30,13 @@ unmapper = ggtt[ggtt.index('static void vf_bootstrap_unmap_node('):
 lifetime = ggtt[ggtt.index('/* BO reservation held'):ggtt.index('/* Called while the PCI probe')]
 remove = ggtt[ggtt.index('static void ggtt_node_remove(struct'):ggtt.index('static void ggtt_node_remove_work_func(')]
 experiment = ggtt[ggtt.index('int xe_ggtt_vf_ct_test('):ggtt.index('static void vf_bootstrap_map_bo(')]
+fill = ggtt[ggtt.index('static u64 xe_ggtt_scratch_pte('):ggtt.index('static void primelockdep(')]
+initial = ggtt[ggtt.index('static void xe_ggtt_initial_clear('):ggtt.index('/* All updates below')]
+finish = ggtt[ggtt.index('void xe_ggtt_vf_bootstrap_finish('):ggtt.index('static void ggtt_node_fini(')]
+fini = ggtt[ggtt.index('static void ggtt_fini(void'):ggtt.index('#ifdef CONFIG_LOCKDEP', ggtt.index('static void ggtt_fini(void'))]
+bootstrap = vf[vf.index('int xe_gt_sriov_vf_bootstrap('):vf.index('/**\n * xe_gt_sriov_vf_guc_versions')]
+uc = (xe / 'xe_uc.c').read_text()
+reconnect = uc[uc.index('static int vf_uc_scratch_test('):uc.index('/**\n * xe_uc_init_post_hwconfig')]
 abi = (xe / 'abi/guc_actions_sriov_abi.h').read_text()
 constants = '\n'.join(line for line in abi.splitlines() if line.startswith('#define ') and
                       any(name in line for name in (
@@ -44,6 +51,7 @@ constants += '\n' + '\n'.join(line for line in (xe / 'xe_guc.h').read_text().spl
                               if line.startswith(('#define MAKE_GUC_VER(', '#define MAKE_GUC_VER_STRUCT(')))
 prefix = r'''
 #include <assert.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,8 +59,13 @@ prefix = r'''
 #include <setjmp.h>
 #include <string.h>
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+#define IS_ALIGNED(v,a) (!((v) & ((a)-1)))
+#define xe_tile_assert(t,c) assert(c)
+#define container_of(p,t,m) ((t *)((char *)(p) - offsetof(t,m)))
+#define xe_device_uc_enabled(x) true
 #define BIT(n) (1u << (n))
 #define BIT_ULL(n) (1ULL << (n))
 #define GENMASK_ULL(h,l) ((~0ULL >> (63-(h))) & (~0ULL << (l)))
@@ -87,8 +100,9 @@ typedef uint64_t u64;
 #define min_t(t,a,b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
 #define lockdep_assert_held(x) ((void)0)
 #define xe_gt_err(...) ((void)0)
-#define xe_gt_info(...) ((void)0)
-#define xe_tile_info(...) ((void)0)
+static void test_log(const char *format, ...) { }
+#define xe_gt_info(g,...) test_log(__VA_ARGS__)
+#define xe_tile_info(t,...) test_log(__VA_ARGS__)
 #define GUC_MAX_MMIO_MSG_LEN 4
 #define XE_PTE_SHIFT 12
 #define XE_PAGE_SIZE 4096
@@ -107,12 +121,35 @@ static struct xe_device device = {.info = {XE_METEORLAKE}};
 #define gt_to_xe(g) (&device)
 #define guc_to_gt(g) ((g)->gt)
 #define IS_SRIOV_VF(x) true
-struct xe_gt { struct xe_tile *tile; struct { struct xe_gt_sriov_vf vf; } sriov; struct {struct xe_guc guc;} uc; };
+struct xe_uc { struct xe_guc guc; };
+struct xe_gt { struct xe_tile *tile; struct { struct xe_gt_sriov_vf vf; } sriov; struct xe_uc uc; };
+#define uc_to_gt(u) ((u)->guc.gt)
 #define xe_guc_ct_enabled(c) (*(c))
-struct xe_tile { struct xe_gt *primary_gt; unsigned id; struct { struct xe_ggtt *ggtt; } mem; };
-struct xe_ggtt { struct xe_tile *tile; bool test_used; u32 test_ct_maps, test_ct_clears; int lock, test_ct_removed; unsigned flags; };
-struct xe_ggtt_node { struct xe_ggtt *ggtt; struct {u64 start, size;} base; bool test_mapped, test_ct_owned, invalidate_on_remove; };
+struct xe_tile { struct xe_gt *primary_gt, *media_gt; unsigned id; struct { struct xe_ggtt *ggtt; } mem; };
+struct drm_mm_node { u64 start, size; bool allocated; };
+struct mock_mm { struct drm_mm_node *node; u64 size; };
+struct xe_bo;
+struct xe_ggtt;
+struct xe_ggtt_pt_ops { u64 (*pte_encode_flags)(struct xe_bo *, u16); void (*ggtt_set_pte)(struct xe_ggtt *, u64, u64); };
+struct xe_ggtt { struct xe_tile *tile; bool test_used, test_scratch_mapped; struct xe_bo *scratch; const struct xe_ggtt_pt_ops *pt_ops; u64 start, size; struct mock_mm mm; u32 test_ct_maps, test_ct_clears; int lock, test_ct_removed; unsigned flags; };
+struct xe_ggtt_node { struct xe_ggtt *ggtt; struct drm_mm_node base; bool test_mapped, test_ct_owned, test_temporary, invalidate_on_remove; };
 struct xe_bo { struct xe_ggtt_node *ggtt_node[1]; u64 size; u64 dma[2048]; };
+#define XE_CACHE_WB 0
+#define xe_cache_pat_idx(t,c) 2
+#define xe_bo_addr(b,o,s) ((b)->dma[0])
+#define for_each_gt(g,x,id) for (id=0; id<2; id++) if (((g) = (id ? (x)->tile->media_gt : (x)->tile->primary_gt)))
+#define drm_mm_for_each_node(n,m) for (n=(m)->node; n && n->allocated; n=NULL)
+#define drm_mm_for_each_hole(n,m,s,e) for (unsigned hi=0; hi<2; hi++) if (((n)=(m)->node, mock_hole(m,hi,&s,&e)))
+static bool mock_hole(struct mock_mm *mm, unsigned i, u64 *s, u64 *e)
+{
+    if (!mm->node || !mm->node->allocated) { *s=0; *e=mm->size; return i==0 && *e; }
+    *s = i ? mm->node->start + mm->node->size : 0;
+    *e = i ? mm->size : mm->node->start;
+    return *e > *s;
+}
+static u64 encode_scratch(struct xe_bo *bo, u16 pat) { assert(pat==2); return 0x20000000000001ULL; }
+static void direct_pte(struct xe_ggtt *g, u64 addr, u64 pte) { assert(0); }
+static const struct xe_ggtt_pt_ops pt_ops = {encode_scratch, direct_pte};
 #define xe_bo_device(b) (&device)
 #define for_each_tile(t,x,id) for (id=0,t=(x)->tile; id<1; id++)
 #define tile_to_xe(t) (&device)
@@ -141,6 +178,7 @@ mock = r'''
 static u64 pt[4096];
 static unsigned updates, handshakes, duplicate_batches, replicate_batches, fail_update;
 static bool fail_handshake, fail_reset, bad_count;
+static unsigned fail_reset_at;
 static bool guc_negotiated, pf_negotiated, fail_version, changed_version;
 static unsigned resets, disables, version_requests, version_queries, invalid_state;
 static void xe_guc_ct_disable(bool *ct) { *ct = false; disables++; }
@@ -151,7 +189,7 @@ static int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *req, u32 le
     if (FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_VF_RESET) {
         assert(len == 1 && !resp); resets++;
         guc_negotiated = pf_negotiated = false;
-        return fail_reset ? -ETIMEDOUT : 0;
+        return fail_reset && (!fail_reset_at || resets==fail_reset_at) ? -ETIMEDOUT : 0;
     }
     assert(len == 4);
     assert(FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_MMIO_RELAY_SERVICE);
@@ -213,7 +251,7 @@ static int xe_guc_relay_send_to_pf_once(struct xe_guc_relay *relay, const u32 *r
 /* Exercise the real version encoder/validator; only firmware replies are fake. */
 static int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *req, u32 len, u32 *resp)
 {
-    assert(!guc->ct && resets == 1 && disables == 1);
+    assert(!guc->ct && resets >= 1 && disables == resets);
     assert(len == VF2GUC_MATCH_VERSION_REQUEST_MSG_LEN);
     assert(FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_MATCH_VERSION);
     assert(!FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MBZ, req[1]));
@@ -233,12 +271,11 @@ static int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *req, u32 len, u3
     return 0;
 }
 static int vf_handshake_with_guc(struct xe_gt *gt);
+static int vf_reset_guc_state(struct xe_gt *gt) { assert(0); return -EIO; }
 static void complete(int *p) { *p = 1; }
-static void init_completion(int *p) { *p = 0; }
 static void reinit_completion(int *p) { *p = 0; }
-static void drm_mm_remove_node(void *n) { }
+static void drm_mm_remove_node(struct drm_mm_node *n) { n->allocated=false; }
 static void ggtt_node_fini(struct xe_ggtt_node *n) { assert(!n->test_mapped); }
-static void xe_ggtt_clear(struct xe_ggtt *g, u64 addr, u64 size) { assert(0); }
 static void xe_ggtt_invalidate(struct xe_ggtt *g) { }
 #define xe_ggtt_node_addr(n) ((n)->base.start)
 #define xe_ggtt_node_size(n) ((n)->base.size)
@@ -258,13 +295,13 @@ static void setup(unsigned pages, bool fragmented)
     gt.sriov.vf.guc_version = (struct xe_uc_fw_version){0, 1, 2, 0};
     tile = (struct xe_tile){.primary_gt = &gt, .mem = {&ggtt}};
     gt.tile = &tile; device.tile = &tile;
-    ggtt = (struct xe_ggtt){.tile = &tile};
-    node = (struct xe_ggtt_node){.ggtt = &ggtt, .base = {7*4096, (u64)pages*4096}};
+    ggtt = (struct xe_ggtt){.tile = &tile, .size=4096ULL*4096, .start=0x7ec00000, .pt_ops=&pt_ops, .mm={&node.base,4096ULL*4096}};
+    node = (struct xe_ggtt_node){.ggtt = &ggtt, .base = {7*4096, (u64)pages*4096, true}};
     bo.ggtt_node[0] = &node; bo.size = (u64)pages*4096;
     for (unsigned i=0; i<pages; i++) bo.dma[i] = 0x1000000ULL + (u64)i*4096 + (fragmented && i>=2 ? 8192 : 0);
     memset(pt, 0, sizeof(pt));
     updates = handshakes = duplicate_batches = replicate_batches = fail_update = 0;
-    ct_requests = ct_fault = ct_fault_at = 0;
+    ct_requests = ct_fault = ct_fault_at = fail_reset_at = 0;
     fail_handshake = fail_reset = bad_count = false;
     resets = disables = version_requests = version_queries = invalid_state = 0;
     guc_negotiated = true;
@@ -273,6 +310,7 @@ static void setup(unsigned pages, bool fragmented)
 '''
 lifecycle_mocks = r'''
 static unsigned allocations, releases, backing_frees, reclaim_blocked;
+static unsigned reconnect_fault, enable_calls, connect_calls, query_calls;
 static bool deferred_release, pending_release, missing_removal, create_fails, query_fails;
 static struct xe_bo *xe_bo_create_pin_map_novm(struct xe_device *x, struct xe_tile *t,
                                              size_t size, int type, u32 flags_in, bool intr)
@@ -280,7 +318,7 @@ static struct xe_bo *xe_bo_create_pin_map_novm(struct xe_device *x, struct xe_ti
     allocations++;
     if (create_fails) return (void *)(intptr_t)-ENOMEM;
     assert(gt.uc.guc.ct && gt.sriov.vf.test_ct_ggtt);
-    node.base.size = bo.size = size; node.base.start = 7*4096;
+    node.base.size = bo.size = size; node.base.start = 7*4096; node.base.allocated=true;
     bo.ggtt_node[0] = &node;
     for (unsigned i=0; i<size/4096; i++) bo.dma[i] = 0x1000000ULL + (u64)i*4096;
     vf_bootstrap_map_bo(&ggtt,&bo, flags_in & XE_BO_FLAG_NEEDS_UC ? 1 : flags);
@@ -307,13 +345,18 @@ static long wait_for_completion_timeout(int *p, unsigned long timeout)
     if (pending_release) finish_release();
     return *p;
 }
+static int xe_guc_enable_communication(struct xe_guc *g)
+{ enable_calls++; if (reconnect_fault==1) return -EIO; g->ct=true; return 0; }
+static int xe_gt_sriov_vf_connect(struct xe_gt *g)
+{ connect_calls++; return reconnect_fault==2 ? -EIO : 0; }
 static int xe_gt_sriov_vf_query_runtime(struct xe_gt *g)
-{ return query_fails ? -EIO : 0; }
+{ query_calls++; return query_fails || reconnect_fault==3 ? -EIO : 0; }
 static void lifetime_setup(void)
 {
     setup(1,false);
     gt.uc.guc.ct = gt.sriov.vf.test_ct_passed = true;
     allocations = releases = backing_frees = reclaim_blocked = 0;
+    reconnect_fault = enable_calls = connect_calls = query_calls = 0;
     deferred_release = pending_release = missing_removal = create_fails = query_fails = false;
 }
 '''
@@ -462,7 +505,7 @@ int main(void)
         lifetime_setup(); deferred_release = deferred;
         assert(!xe_ggtt_vf_ct_test(&gt));
         assert(allocations == 2 && releases == 2 && backing_frees == 2 && reclaim_blocked == 2);
-        assert(ggtt.test_ct_maps == 1026 && ggtt.test_ct_clears == 1026 && !gt.sriov.vf.test_ct_ggtt);
+        assert(ggtt.test_ct_maps == 1026 && ggtt.test_ct_clears == 1026 && gt.sriov.vf.test_ct_ggtt);
         assert(!updates && !resets && ct_requests == 6);
         puts(deferred ? "PASS deferred TTM release: wait for clear and node removal before next allocation" :
                         "PASS ordinary BO lifecycle: two allocations, clear before backing release, reclaim blocked while mapped");
@@ -483,13 +526,115 @@ int main(void)
     if (!setjmp(held)) { xe_ggtt_vf_ct_test(&gt); assert(0); }
     assert(allocations == 2 && backing_frees == 2 && gt.sriov.vf.test_ct_ggtt && !resets);
     puts("PASS final CT query failure: no success marker or consumer reset");
+
+    static struct xe_bo scratch = {.size=4096, .dma={0x71000000}};
+    const u64 scratch_pte = 0x20000071000001ULL;
+    setup(1, false); ggtt.scratch=&scratch;
+    gt.uc.guc.ct=gt.sriov.vf.test_ct_passed=gt.sriov.vf.test_ct_ggtt=true;
+    vf_bootstrap_map_bo(&ggtt,&bo,flags);
+    xe_ggtt_initial_clear(&ggtt);
+    assert(ggtt.test_scratch_mapped && ct_requests == 6 && !updates);
+    for (unsigned i=0; i<4096; i++) assert(pt[i] == (i==7 ? flags|bo.dma[0] : scratch_pte));
+    puts("PASS scratch holes: preserve allocated node, duplicate DMA/PAT across all holes");
+    assert(xe_ggtt_vf_bootstrap_bo_mapped(&scratch));
+    if (!setjmp(held)) { xe_ggtt_vf_bootstrap_unmap_bo(&scratch); assert(0); }
+    assert(ggtt.test_scratch_mapped && ggtt.scratch==&scratch);
+    puts("PASS scratch reclaim and early backing release blocked without a GGTT node");
+    if (!setjmp(held)) { ggtt_fini(&ggtt); assert(0); }
+    assert(ggtt.scratch==&scratch);
+    puts("PASS early devres fini retains scratch pointer while translations exist");
+    vf_bootstrap_unmap_node(&node);
+    assert(!node.test_mapped && pt[7]==scratch_pte && ggtt.test_scratch_mapped);
+    ggtt_node_remove(&node);
+    assert(!ggtt.test_ct_removed);
+    puts("PASS ordinary CT node returns to scratch without completing temporary-node wait");
+    assert(!xe_gt_sriov_vf_bootstrap(&gt));
+    assert(!gt.uc.guc.ct && !gt.sriov.vf.test_ct_ggtt && !gt.sriov.vf.test_relay_ready);
+    assert(resets==1 && version_requests==1);
+    for (unsigned i=0; i<4096; i++) assert(pt[i]==scratch_pte);
+    puts("PASS expected bootstrap reset: single attempt, fresh interface, scratch retained");
+    gt.uc.guc.ct=gt.sriov.vf.test_ct_ggtt=true;
+    vf_bootstrap_map_bo(&ggtt,&bo,flags);
+    assert(node.test_mapped && pt[7]==(flags|bo.dma[0]));
+    node.base.allocated=true;
+    xe_ggtt_vf_bootstrap_finish(&device);
+    assert(!node.test_mapped && !ggtt.test_scratch_mapped && !gt.uc.guc.ct);
+    assert(resets==2 && version_requests==2 && updates==4);
+    for (unsigned i=0; i<4096; i++) assert(pt[i]==1);
+    assert(!xe_ggtt_vf_bootstrap_bo_mapped(&scratch));
+    xe_ggtt_vf_bootstrap_unmap_bo(&scratch);
+    ggtt_fini(&ggtt); assert(!ggtt.scratch);
+    puts("PASS complete managed-range clear covers holes and nodes before scratch release");
+    setup(1,false); ggtt.scratch=&scratch;
+    gt.uc.guc.ct=gt.sriov.vf.test_ct_passed=gt.sriov.vf.test_ct_ggtt=true;
+    ct_fault=1; ct_fault_at=2;
+    if (!setjmp(held)) { xe_ggtt_initial_clear(&ggtt); assert(0); }
+    assert(ct_requests==2 && ggtt.test_scratch_mapped && ggtt.test_used && !resets);
+    puts("PASS partial scratch fill: uncertain reply retains backing without reset or rollback");
+    setup(1,false); ggtt.scratch=&scratch; ggtt.test_scratch_mapped=ggtt.test_used=true;
+    node.test_mapped=true; fail_update=2;
+    if (!setjmp(held)) { xe_ggtt_vf_bootstrap_finish(&device); assert(0); }
+    assert(updates==2 && node.test_mapped && ggtt.test_scratch_mapped && ggtt.scratch==&scratch);
+    puts("PASS partial final clear: no node retirement or scratch release after lost reply");
+    setup(1,false); ggtt.scratch=&scratch; ggtt.test_scratch_mapped=ggtt.test_used=true;
+    node.test_mapped=true; fail_reset=true;
+    if (!setjmp(held)) { xe_ggtt_vf_bootstrap_finish(&device); assert(0); }
+    assert(!updates && node.test_mapped && ggtt.test_scratch_mapped);
+    puts("PASS failed final reset: no full-range clear or backing release");
+    for (volatile unsigned fault=0; fault<4; fault++) {
+        setup(1,false);
+        volatile u64 start=ggtt.start, size=4096;
+        if (fault==0) start--;
+        if (fault==1) size++;
+        if (fault==2) start+=ggtt.size;
+        if (fault==3) size=~0ULL-4095;
+        if (!setjmp(held)) { vf_bootstrap_fill(&ggtt,start,size,scratch_pte); assert(0); }
+        assert(!updates && !ct_requests);
+    }
+    puts("PASS invalid scratch fills: misalignment, underflow, overrun and huge size rejected before relay");
+    setup(1,false);
+    vf_bootstrap_fill(&ggtt,ggtt.start+ggtt.size,0,scratch_pte);
+    assert(!updates && !ct_requests);
+    puts("PASS empty fill at end: no request");
+    lifetime_setup(); ggtt.scratch=&scratch; ggtt.test_scratch_mapped=true;
+    ggtt.test_ct_maps=23; ggtt.test_ct_clears=7;
+    assert(!xe_ggtt_vf_ct_test(&gt));
+    assert(ggtt.test_ct_maps==1049 && ggtt.test_ct_clears==1033 && backing_frees==2);
+    for (unsigned i=0; i<1025; i++) assert(pt[7+i]==scratch_pte);
+    puts("PASS post-reset temporary lifetimes: scratch restore and delta accounting with earlier CT mappings");
+
+    for (volatile unsigned fault=1; fault<=3; fault++) {
+        lifetime_setup(); reconnect_fault=fault; gt.uc.guc.ct=false;
+        if (!setjmp(held)) { vf_uc_scratch_test(&gt.uc); assert(0); }
+        assert(enable_calls==1 && connect_calls==(fault>1) && query_calls==(fault>2));
+        assert(!allocations && !updates && !resets);
+        printf("PASS reconnect failure %u: hold before allocation, reset or teardown\n",fault);
+    }
+    lifetime_setup(); gt.uc.guc.ct=false; ggtt.scratch=&scratch; ggtt.test_scratch_mapped=true;
+    assert(vf_uc_scratch_test(&gt.uc)==-EOPNOTSUPP);
+    assert(enable_calls==1 && connect_calls==1 && query_calls==2 && backing_frees==2);
+    assert(gt.uc.guc.ct && ggtt.test_scratch_mapped && !resets);
+    puts("PASS real reconnect checkpoint: native enable/handshake/query, temporary lifetimes, deliberate stop");
+    setup(1,false); ggtt.scratch=&scratch; ggtt.test_used=ggtt.test_scratch_mapped=true;
+    node.test_mapped=true;
+    struct xe_gt media = gt;
+    media.uc.guc.gt=&media; tile.media_gt=&media;
+    fail_reset=true; fail_reset_at=2;
+    if (!setjmp(held)) { xe_ggtt_vf_bootstrap_finish(&device); assert(0); }
+    assert(resets==2 && !updates && node.test_mapped && ggtt.test_scratch_mapped);
+    puts("PASS media consumer-reset failure: no GGTT clear after primary-only acknowledgment");
+    setup(1,false); ggtt.scratch=&scratch; ggtt.test_used=ggtt.test_scratch_mapped=true;
+    node.test_mapped=true; media=gt; media.uc.guc.gt=&media; tile.media_gt=&media;
+    xe_ggtt_vf_bootstrap_finish(&device);
+    assert(resets==2 && version_requests==2 && updates==4 && !ggtt.test_scratch_mapped && !node.test_mapped);
+    puts("PASS both GT consumers reset and renegotiated before shared GGTT cleanup");
     return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='xe-bootstrap-test-') as temp:
     c = Path(temp) / 'test.c'
     exe = Path(temp) / 'test'
-    c.write_text(prefix + constants + mock + helpers + update + quiesce + negotiation + mapper + unmapper + lifetime + remove + main_globals + lifecycle_mocks + experiment + main)
+    c.write_text(prefix + constants + mock + helpers + update + quiesce + negotiation + bootstrap + fill + initial + mapper + unmapper + lifetime + finish + fini + remove + main_globals + lifecycle_mocks + experiment + reconnect + main)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-Wall', '-Wextra',
                     '-Werror', '-Wno-sign-compare', '-Wno-unused-parameter',
                     '-Wno-unused-but-set-variable', *shlex.split(os.environ.get('CFLAGS', '')), '-I', str(xe),
