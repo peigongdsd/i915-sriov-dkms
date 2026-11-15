@@ -41,15 +41,8 @@ static inline bool xe_guc_ct_enabled(struct xe_guc_ct *ct)
 	return READ_ONCE(ct->state) == XE_GUC_CT_STATE_ENABLED;
 }
 
-static inline void xe_guc_ct_irq_handler(struct xe_guc_ct *ct)
-{
-	if (!xe_guc_ct_enabled(ct))
-		return;
-
-	wake_up_all(&ct->wq);
-	queue_work(ct->g2h_wq, &ct->g2h_worker);
-	xe_guc_ct_fast_path(ct);
-}
+void xe_guc_ct_irq_handler(struct xe_guc_ct *ct);
+bool xe_guc_ct_recheck_rx(struct xe_guc_ct *ct, const char *phase, u32 id);
 
 /* Basic CT send / receives */
 int xe_guc_ct_send(struct xe_guc_ct *ct, const u32 *action, u32 len,

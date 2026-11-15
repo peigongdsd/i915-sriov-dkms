@@ -28,6 +28,7 @@
 #include "xe_guc_relay_types.h"
 #include "xe_pm.h"
 #include "xe_sriov.h"
+#include "xe_trace_guc.h"
 
 /*
  * How long should we wait for the response?
@@ -619,6 +620,7 @@ int xe_guc_relay_send_to_pf_once(struct xe_guc_relay *relay,
 {
 	struct relay_transaction *txn;
 	unsigned long expires, remaining;
+	bool rx_kicked = false;
 	int ret;
 
 	relay_assert(relay, IS_SRIOV_VF(relay_to_xe(relay)));
@@ -632,6 +634,8 @@ int xe_guc_relay_send_to_pf_once(struct xe_guc_relay *relay,
 	if (IS_ERR(txn))
 		return PTR_ERR(txn);
 	txn->no_retry = true;
+	trace_xe_guc_relay_rx(relay_to_xe(relay), relay_to_gt(relay)->info.id,
+			      "send-once", txn->rid, PFID, 0, len, msg[0]);
 	spin_lock(&relay->lock);
 	list_add_tail(&txn->link, &relay->pending_relays);
 	spin_unlock(&relay->lock);
@@ -663,6 +667,13 @@ int xe_guc_relay_send_to_pf_once(struct xe_guc_relay *relay,
 		if (!pending)
 			break;
 		if (time_after_eq(jiffies, expires)) {
+			/* Keep the RID registered while the normal parser runs. */
+			if (!rx_kicked) {
+				rx_kicked = true;
+				if (xe_guc_ct_recheck_rx(relay_to_ct(relay),
+						       "relay-timeout", txn->rid))
+					continue;
+			}
 			ret = -ETIME;
 			break;
 		}
@@ -704,6 +715,9 @@ static int relay_handle_reply(struct xe_guc_relay *relay, u32 origin,
 	}
 	spin_unlock(&relay->lock);
 
+	trace_xe_guc_relay_rx(relay_to_xe(relay), relay_to_gt(relay)->info.id,
+			      err ? "reply-unmatched" : "reply-matched", rid, origin,
+			      reply, len, len ? msg[0] : 0);
 	return err;
 }
 

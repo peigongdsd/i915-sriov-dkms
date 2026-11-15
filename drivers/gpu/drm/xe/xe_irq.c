@@ -731,6 +731,9 @@ static irqreturn_t vf_mem_irq_handler(int irq, void *arg)
 	struct xe_tile *tile;
 	unsigned int id;
 
+	for_each_tile(tile, xe, id)
+		xe_memirq_trace(&tile->memirq, "irq-entry");
+
 	if (!atomic_read(&xe->irq.enabled))
 		return IRQ_NONE;
 
