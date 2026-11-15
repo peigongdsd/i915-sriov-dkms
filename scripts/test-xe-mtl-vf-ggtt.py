@@ -106,7 +106,7 @@ static void test_log(const char *format, ...) { }
 #define XE_PAGE_SIZE 4096
 struct xe_uc_fw_version { u32 branch, major, minor, patch; };
 struct xe_gt_sriov_vf {
-    bool test_reset_seen, ggtt_relay_ready, test_ct_ggtt, test_ct_passed; u8 ggtt_magic; int memirq_dispatches;
+    bool ggtt_relay_ready; u8 ggtt_magic;
     struct xe_uc_fw_version guc_version, wanted_guc_version;
 };
 struct xe_gt;
@@ -131,8 +131,8 @@ struct mock_mm { struct drm_mm_node *node; u64 size; };
 struct xe_bo;
 struct xe_ggtt;
 struct xe_ggtt_pt_ops { u64 (*pte_encode_flags)(struct xe_bo *, u16); void (*ggtt_set_pte)(struct xe_ggtt *, u64, u64); };
-struct xe_ggtt { struct xe_tile *tile; bool test_used, vf_scratch_mapped, vf_failed; struct xe_bo *scratch; const struct xe_ggtt_pt_ops *pt_ops; u64 start, size; struct mock_mm mm; u32 test_ct_maps, test_ct_clears; int lock, test_ct_removed; unsigned flags; };
-struct xe_ggtt_node { struct xe_ggtt *ggtt; struct drm_mm_node base; bool vf_mapped, test_ct_owned, test_temporary, invalidate_on_remove; };
+struct xe_ggtt { struct xe_tile *tile; bool vf_scratch_mapped, vf_failed; struct xe_bo *scratch; const struct xe_ggtt_pt_ops *pt_ops; u64 start, size; struct mock_mm mm; int lock; unsigned flags; };
+struct xe_ggtt_node { struct xe_ggtt *ggtt; struct drm_mm_node base; bool vf_mapped, invalidate_on_remove; };
 struct xe_bo { struct xe_ggtt_node *ggtt_node[1]; u64 size; u64 dma[2048]; };
 #define XE_CACHE_WB 0
 #define xe_cache_pat_idx(t,c) 2
@@ -507,7 +507,7 @@ int main(void)
     return 0;
 }
 '''
-with tempfile.TemporaryDirectory(prefix='xe-bootstrap-test-') as temp:
+with tempfile.TemporaryDirectory(prefix='xe-vf-ggtt-test-') as temp:
     c = Path(temp) / 'test.c'
     exe = Path(temp) / 'test'
     c.write_text(prefix + constants + mock + helpers + containment + update + negotiation + softreset + fill + initial + mapper + unmapper + lifetime + fini + remove + main_globals + lifecycle_mocks + main)

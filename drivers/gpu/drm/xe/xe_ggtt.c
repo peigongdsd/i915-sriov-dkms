@@ -543,12 +543,15 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 		phys_addr_t base;
 		u32 permission;
 
-		if (ggtt->tile != xe_device_get_root_tile(xe))
+		if (ggtt->tile != xe_device_get_root_tile(xe)) {
+			xe_tile_err(ggtt->tile, "MTL SR-IOV GSM access requires the root tile\n");
 			return -EOPNOTSUPP;
+		}
 		permission = xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS);
 		if (permission != STOLEN_ACCESS_ALLOWED) {
 			xe_tile_err(ggtt->tile,
-				    "MTL SR-IOV GSM access denied by firmware (%#x)\n", permission);
+				    "MTL SR-IOV GSM access not permitted by firmware (permission %#x)\n",
+				    permission);
 			return -EOPNOTSUPP;
 		}
 		base = xe_mmio_read64_2x32(xe_root_tile_mmio(xe), GSMBASE) & BDSM_MASK;
@@ -1154,11 +1157,10 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 		u16 pat_index = xe_cache_pat_idx(tile_to_xe(ggtt->tile), cache_mode);
 		u64 pte = ggtt->pt_ops->pte_encode_flags(bo, pat_index);
 
-		if (native) {
+		if (native)
 			vf_ggtt_map_bo(ggtt, bo, pte);
-		} else {
+		else
 			xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
-		}
 	}
 unlock:
 	mutex_unlock(&ggtt->lock);

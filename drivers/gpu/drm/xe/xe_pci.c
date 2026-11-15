@@ -1291,7 +1291,7 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return err;
 
 	if (xe_gt_sriov_vf_native(xe))
-		xe_info(xe, "MTL VF: native full probe using PF-mediated GGTT; pci_vf=%u\n",
+		xe_info(xe, "MTL VF: mtl-native-clean-v1 full probe using PF-mediated GGTT; pci_vf=%u\n",
 			pdev->is_virtfn);
 	err = xe_device_probe(xe);
 	if (xe_gt_sriov_vf_native(xe))
