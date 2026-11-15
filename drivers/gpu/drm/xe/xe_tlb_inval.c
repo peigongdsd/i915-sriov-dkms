@@ -266,7 +266,7 @@ static void xe_tlb_inval_fence_prep(struct xe_tlb_inval_fence *fence)
 		tlb_inval->seqno = 1;
 }
 
-#define xe_tlb_inval_issue(__tlb_inval, __fence, op, args...)	\
+#define __xe_tlb_inval_issue(__tlb_inval, __fence, op, args...)	\
 ({								\
 	int __ret;						\
 								\
@@ -280,9 +280,17 @@ static void xe_tlb_inval_fence_prep(struct xe_tlb_inval_fence *fence)
 		xe_tlb_inval_fence_signal_unlocked((__fence));	\
 	mutex_unlock(&(__tlb_inval)->seqno_lock);		\
 								\
-	/* Undelivered: fence already signalled, report done */	\
-	(__ret == -ECANCELED || __ret == -ENOTRECOVERABLE) ? 0 : __ret;	\
+	__ret;							\
 })
+
+static int tlb_inval_result(int ret)
+{
+	/* Undelivered: fence already signalled, report done to ordinary callers. */
+	return ret == -ECANCELED || ret == -ENOTRECOVERABLE ? 0 : ret;
+}
+
+#define xe_tlb_inval_issue(tlb_inval, fence, op, args...) \
+	tlb_inval_result(__xe_tlb_inval_issue(tlb_inval, fence, op, ##args))
 
 /**
  * xe_tlb_inval_all() - Issue a TLB invalidation for all TLBs
@@ -307,10 +315,10 @@ static int tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval, bool report_fence_erro
 	int ret;
 
 	xe_tlb_inval_fence_init(tlb_inval, &fence, true);
-	ret = xe_tlb_inval_issue(tlb_inval, &fence, tlb_inval->ops->ggtt);
+	ret = __xe_tlb_inval_issue(tlb_inval, &fence, tlb_inval->ops->ggtt);
 	xe_tlb_inval_fence_wait(&fence);
 
-	return ret ?: (report_fence_error ? READ_ONCE(fence.base.error) : 0);
+	return report_fence_error ? ret ?: READ_ONCE(fence.base.error) : tlb_inval_result(ret);
 }
 
 /**

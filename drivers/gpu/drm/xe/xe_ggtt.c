@@ -538,17 +538,28 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 
 	ggtt->gsm = ggtt->tile->mmio.regs + SZ_8M;
 
-	/* Match i915 on the MTL/ARL PF when firmware permits direct GSM access. */
-	if (xe->info.platform == XE_METEORLAKE && IS_SRIOV_PF(xe) &&
-	    ggtt->tile == xe_device_get_root_tile(xe) &&
-	    xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS) ==
-	    STOLEN_ACCESS_ALLOWED) {
-		phys_addr_t base = xe_mmio_read64_2x32(xe_root_tile_mmio(xe), GSMBASE) & BDSM_MASK;
+	/* MTL PF writes require firmware-permitted direct GSM access. */
+	if (xe->info.platform == XE_METEORLAKE && IS_SRIOV_PF(xe)) {
+		phys_addr_t base;
+		u32 permission;
+
+		if (ggtt->tile != xe_device_get_root_tile(xe))
+			return -EOPNOTSUPP;
+		permission = xe_mmio_read32(xe_root_tile_mmio(xe), MTL_PCODE_STOLEN_ACCESS);
+		if (permission != STOLEN_ACCESS_ALLOWED) {
+			xe_tile_err(ggtt->tile,
+				    "MTL SR-IOV GSM access denied by firmware (%#x)\n", permission);
+			return -EOPNOTSUPP;
+		}
+		base = xe_mmio_read64_2x32(xe_root_tile_mmio(xe), GSMBASE) & BDSM_MASK;
+		if (!base)
+			return -ENODEV;
 
 		ggtt->gsm = devm_ioremap(xe->drm.dev, base, gsm_size);
 		if (!ggtt->gsm)
 			return -ENOMEM;
 	}
+
 	if (IS_DGFX(xe) && xe->info.vram_flags & XE_VRAM_FLAGS_NEED64K)
 		ggtt->flags |= XE_GGTT_FLAGS_64K;
 
