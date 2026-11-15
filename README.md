@@ -1,3 +1,7 @@
+> **MTL native Xe VF candidate:** see [implementation and choices](docs/xe-mtl-sriov.md),
+> [validation](docs/xe-mtl-sriov-validation.md), and [release blockers](docs/xe-mtl-sriov-readiness.md).
+> This consolidated branch is not yet production-ready; the tested v8.2 deployment remains separate.
+
 # Linux i915 and xe driver (dkms module) with SR-IOV support for linux
 
 This repo is a code snapshot of the i915 and xe modules from the mainline linux kernel with SR-IOV support ported from the [intel/mainline-tracking.git](https://github.com/intel/mainline-tracking.git)
