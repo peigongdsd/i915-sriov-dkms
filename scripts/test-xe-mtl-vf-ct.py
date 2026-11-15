@@ -14,6 +14,7 @@ import tempfile
 xe = Path(__file__).resolve().parents[1] / 'drivers/gpu/drm/xe'
 ct = (xe / 'xe_guc_ct.c').read_text()
 relay = (xe / 'xe_guc_relay.c').read_text()
+recheck = ct[ct.index('bool xe_guc_ct_recheck_rx('):ct.index('static void guc_ct_ctb_h2g_init(')]
 core = ct[ct.index('#define GUC_SEND_RETRY_LIMIT'):ct.index('static u32 *msg_to_hxg(')]
 send = relay[relay.index('static int relay_send_transaction('):relay.index('static void __fini_relay(')]
 once = relay[relay.index('int xe_guc_relay_send_to_pf_once('):relay.index('static int relay_handle_failure(')]
@@ -50,6 +51,7 @@ typedef uint32_t u32;
 #define xe_gt_err(...) ((void)0)
 #define relay_debug(...) ((void)0)
 #define relay_notice(...) ((void)0)
+#define trace_xe_guc_relay_rx(...) ((void)0)
 #define relay_assert(r,c) assert(c)
 #define IS_SRIOV_VF(x) true
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
@@ -57,7 +59,9 @@ typedef uint32_t u32;
 #define LNL_FLUSH_WORK(...) ((void)0)
 #define guard(t) int unused_guard __attribute__((unused)) = 0; (void)
 #define xe_device_wedged(x) false
-struct xe_gt { int unused; };
+struct xe_tile { int memirq; };
+static struct xe_tile tile;
+struct xe_gt { struct xe_tile *tile; };
 static struct xe_gt test_gt;
 #define ct_to_gt(c) (&test_gt)
 #define ct_to_xe(c) NULL
@@ -67,9 +71,19 @@ struct g2h_fence {
 };
 struct xe_gt_sriov_pf_ggtt_token { int unused; };
 struct xe_guc_ct {
-    int lock, g2h_fence_wq;
+    int lock, g2h_fence_wq, g2h_wq, g2h_worker;
     struct g2h_fence *fence_lookup;
 };
+static bool native, ct_enabled;
+static unsigned kicks, flushes;
+static int deliver_guc, deliver_pf;
+#define xe_gt_sriov_vf_native(x) native
+#define xe_guc_ct_enabled(c) ct_enabled
+#define lockdep_assert_not_held(p) assert(!*(p))
+#define ct_trace_rx(c,p,id,r) ((void)(r))
+#define xe_memirq_trace(...) ((void)0)
+static bool queue_work(int wq, int *work) { kicks++; return true; }
+static void flush_work(int *work);
 static unsigned long jiffies;
 static unsigned sends, resets, locks, waits;
 static struct xe_guc_ct *current_ct;
@@ -192,6 +206,28 @@ static long wait_for_completion_timeout(struct completion *c, unsigned long time
     return 1;
 }
 '''
+delivery = r'''
+static void flush_work(int *work)
+{
+    assert(!locks);
+    flushes++;
+    if (deliver_guc && current_ct && current_ct->fence_lookup) {
+        struct g2h_fence *f = current_ct->fence_lookup;
+        f->done = true;
+        f->wait = deliver_guc == BUSY;
+        f->retry = deliver_guc == RETRY;
+        if (!f->wait) current_ct->fence_lookup = NULL;
+        deliver_guc = 0;
+    }
+    if (deliver_pf && transaction.link.linked) {
+        u32 response = FIELD_PREP(GUC_HXG_MSG_0_TYPE,GUC_HXG_TYPE_RESPONSE_SUCCESS) | 1;
+        int ret = relay_handle_reply(active_relay, 0, wrong_rid ? 43 : 42,
+                                     deliver_pf == BUSY ? -EBUSY : 0, &response, 1);
+        assert(ret == (wrong_rid ? -ESRCH : 0));
+        deliver_pf = 0;
+    }
+}
+'''
 main = r'''
 static struct xe_guc_relay relay;
 static const u32 msg[] = { 0x102, 0, 1, 0 };
@@ -201,6 +237,8 @@ static void setup(void)
     memset(guc_replies,0,sizeof(guc_replies)); memset(pf_replies,0,sizeof(pf_replies));
     jiffies=sends=resets=locks=waits=releases=pf_index=guc_index=completion_waits=0;
     active_relay=&relay; ready=true; wrong_rid=busy_then_success=false;
+    native=false; ct_enabled=true; kicks=flushes=0; deliver_guc=deliver_pf=0;
+    current_ct=NULL; test_gt.tile=&tile;
 }
 int main(void)
 {
@@ -261,13 +299,57 @@ int main(void)
     assert(xe_guc_relay_send_to_pf_once(&relay,msg,0,&response,1)==-EINVAL);
     assert(!sends && !releases);
     puts("PASS invalid request rejected before allocation");
+    setup(); native=true; guc_replies[0]=LOST; deliver_guc=FAIL;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==1);
+    assert(sends==1 && kicks==1 && flushes==1 && releases==1);
+    puts("PASS unread GuC ack: one worker pass, original fence and RID, no resend");
+    setup(); native=true; pf_replies[0]=LOST; deliver_pf=FAIL;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==1);
+    assert(sends==1 && kicks==1 && releases==1);
+    puts("PASS unread PF success: same registered RID, no resend");
+    setup(); native=true; guc_replies[0]=LOST; deliver_guc=FAIL; deliver_pf=FAIL;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==1);
+    assert(sends==1 && kicks==1 && releases==1);
+    puts("PASS ack and PF reply drained together before relay waiter starts");
+    setup(); native=true; guc_replies[0]=LOST;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-ETIME);
+    assert(sends==1 && kicks==1 && releases==1 && !relay.ct.fence_lookup);
+    puts("PASS empty receive pass: original timeout, no fabricated success");
+    setup(); native=true; guc_replies[0]=LOST; deliver_guc=RETRY;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-EAGAIN);
+    assert(sends==1 && kicks==1 && releases==1);
+    puts("PASS drained GuC RETRY remains terminal for a one-shot request");
+    setup(); native=true; guc_replies[0]=LOST; deliver_guc=BUSY;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-ETIME);
+    assert(sends==1 && kicks==1 && releases==1);
+    puts("PASS drained GuC BUSY does not extend deadline or repeat kick");
+    setup(); native=true; pf_replies[0]=LOST; deliver_pf=BUSY;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-ETIME);
+    assert(sends==1 && kicks==1 && releases==1);
+    puts("PASS drained PF BUSY remains bounded, no second kick");
+    setup(); native=true; pf_replies[0]=LOST; deliver_pf=FAIL; wrong_rid=true;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-ETIME);
+    assert(sends==1 && kicks==1 && releases==1);
+    puts("PASS wrong RID during recovery cannot complete the transaction");
+    setup(); native=true; ct_enabled=false; guc_replies[0]=LOST;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-ETIME);
+    assert(!kicks && sends==1 && releases==1);
+    puts("PASS disabled CT is not restarted by receive recovery");
+    setup(); guc_replies[0]=LOST;
+    assert(xe_guc_relay_send_to_pf_once(&relay,msg,4,&response,1)==-ETIME);
+    assert(!kicks);
+    puts("PASS non-native device keeps original timeout behavior");
+    setup(); native=true; guc_replies[0]=LOST;
+    assert(xe_guc_ct_send_recv(&relay.ct,msg,4,NULL)==-ETIME);
+    assert(!kicks && sends==1);
+    puts("PASS ordinary replay-capable CT has no new timeout kick");
     return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='xe-ct-once-') as temp:
     c = Path(temp) / 'test.c'
     exe = Path(temp) / 'test'
-    c.write_text(prefix + core + relay_mock + send + once + main)
+    c.write_text(prefix + recheck + core + relay_mock + delivery + send + once + main)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-Wall', '-Wextra',
                     '-Werror', '-Wno-unused-parameter', '-Wno-unused-variable',
                     *shlex.split(os.environ.get('CFLAGS', '')), '-I', str(xe),

@@ -25,6 +25,7 @@
 #include "xe_gt_sriov_pf_control.h"
 #include "xe_gt_sriov_pf_monitor.h"
 #include "xe_gt_sriov_pf_service.h"
+#include "xe_gt_sriov_vf.h"
 #include "xe_guc.h"
 #include "xe_guc_log.h"
 #include "xe_guc_pagefault.h"
@@ -32,6 +33,7 @@
 #include "xe_guc_submit.h"
 #include "xe_guc_tlb_inval.h"
 #include "xe_map.h"
+#include "xe_memirq.h"
 #include "xe_page_reclaim.h"
 #include "xe_pm.h"
 #include "xe_sleep.h"
@@ -434,6 +436,73 @@ int xe_guc_ct_init_post_hwconfig(struct xe_guc_ct *ct)
 #define desc_write(xe_, guc_ctb__, field_, val_)		\
 	xe_map_wr_field(xe_, &guc_ctb__->desc, 0,		\
 			struct guc_ct_buffer_desc, field_, val_)
+
+static void ct_trace_rx(struct xe_guc_ct *ct, const char *phase, u32 fence, int result)
+{
+	struct guc_ctb *g2h = &ct->ctbs.g2h;
+	struct xe_device *xe = ct_to_xe(ct);
+	u32 head = 0, tail = 0, status = 0;
+
+	if (!trace_xe_guc_ct_rx_enabled())
+		return;
+	/* Worker entry/PM-skip tracing must not access powered-down VRAM. */
+	if (g2h->bo && !g2h->desc.is_iomem && xe_guc_ct_enabled(ct)) {
+		head = desc_read(xe, g2h, head);
+		tail = desc_read(xe, g2h, tail);
+		status = desc_read(xe, g2h, status);
+	}
+	trace_xe_guc_ct_rx(xe, ct_to_gt(ct)->info.id, phase, READ_ONCE(ct->state),
+			   READ_ONCE(g2h->info.head), head, tail, status, fence, result,
+			   work_pending(&ct->g2h_worker));
+}
+
+void xe_guc_ct_irq_handler(struct xe_guc_ct *ct)
+{
+	bool queued;
+
+	if (!xe_guc_ct_enabled(ct)) {
+		ct_trace_rx(ct, "irq-disabled", 0, 0);
+		return;
+	}
+
+	wake_up_all(&ct->wq);
+	queued = queue_work(ct->g2h_wq, &ct->g2h_worker);
+	ct_trace_rx(ct, "irq-queue", 0, queued);
+	xe_guc_ct_fast_path(ct);
+}
+
+/**
+ * xe_guc_ct_recheck_rx - Give a native MTL VF's pending reply one receive pass
+ * @ct: live CT channel
+ * @phase: caller identifying the CT fence or PF relay wait
+ * @id: pending fence number or relay ID
+ *
+ * The caller must keep its waiter registered and hold no CT or relay lock.
+ * Reuse the ordinary worker and parsers, without resending any request. This
+ * does not cancel an update or establish quiescence if the reply stays absent.
+ * Like the existing timeout flush, this waits for a running worker to finish.
+ *
+ * Return: true if the native VF receive worker was kicked and flushed.
+ */
+bool xe_guc_ct_recheck_rx(struct xe_guc_ct *ct, const char *phase, u32 id)
+{
+	bool queued;
+
+	if (!xe_gt_sriov_vf_native(ct_to_xe(ct)))
+		return false;
+
+	lockdep_assert_not_held(&ct->lock);
+	ct_trace_rx(ct, phase, id, 0);
+	xe_memirq_trace(&ct_to_gt(ct)->tile->memirq, phase);
+	if (!xe_guc_ct_enabled(ct))
+		return false;
+
+	queued = queue_work(ct->g2h_wq, &ct->g2h_worker);
+	ct_trace_rx(ct, "timeout-queue", id, queued);
+	flush_work(&ct->g2h_worker);
+	ct_trace_rx(ct, "timeout-drained", id, 0);
+	return true;
+}
 
 static void guc_ct_ctb_h2g_init(struct xe_device *xe, struct guc_ctb *h2g,
 				struct iosys_map *map)
@@ -1353,6 +1422,7 @@ static int guc_ct_send_recv(struct xe_guc_ct *ct, const u32 *action, u32 len,
 	unsigned long expires;
 	struct g2h_fence g2h_fence;
 	unsigned int retries = 0;
+	bool rx_kicked = false;
 	int ret = 0;
 
 	/*
@@ -1404,7 +1474,15 @@ wait_again:
 				 replay ? HZ :
 				 time_before(jiffies, expires) ? expires - jiffies : 0);
 	if (!ret) {
-		LNL_FLUSH_WORK(&ct->g2h_worker);
+		bool rechecked = false;
+
+		/* One receive pass per single-attempt request, including BUSY. */
+		if (!replay && !rx_kicked) {
+			rx_kicked = true;
+			rechecked = xe_guc_ct_recheck_rx(ct, "ct-timeout", g2h_fence.seqno);
+		}
+		if (!rechecked)
+			LNL_FLUSH_WORK(&ct->g2h_worker);
 		if (READ_ONCE(g2h_fence.done)) {
 			xe_gt_warn(gt, "G2H fence %u, action %04x, done\n",
 				   g2h_fence.seqno, action[0]);
@@ -1587,6 +1665,7 @@ static int parse_g2h_response(struct xe_guc_ct *ct, u32 *msg, u32 len)
 	struct g2h_fence *g2h_fence;
 
 	lockdep_assert_held(&ct->lock);
+	ct_trace_rx(ct, "response", fence, type);
 
 	/*
 	 * Fences for FAST_REQUEST messages are not tracked in ct->fence_lookup.
@@ -2081,8 +2160,11 @@ static void receive_g2h(struct xe_guc_ct *ct)
 	 * completing, creating a deadlock.
 	 */
 	ongoing = xe_pm_runtime_get_if_active(ct_to_xe(ct));
-	if (!ongoing && xe_pm_read_callback_task(ct_to_xe(ct)) == NULL)
+	if (!ongoing && xe_pm_read_callback_task(ct_to_xe(ct)) == NULL) {
+		ct_trace_rx(ct, "pm-skip", 0, 0);
 		return;
+	}
+	ct_trace_rx(ct, "receive", 0, ongoing);
 
 	do {
 		mutex_lock(&ct->lock);
@@ -2096,6 +2178,7 @@ static void receive_g2h(struct xe_guc_ct *ct)
 		}
 	} while (ret == 1);
 
+	ct_trace_rx(ct, "receive-done", 0, ret);
 	if (ongoing)
 		xe_pm_runtime_put(ct_to_xe(ct));
 }
@@ -2104,7 +2187,9 @@ static void g2h_worker_func(struct work_struct *w)
 {
 	struct xe_guc_ct *ct = container_of(w, struct xe_guc_ct, g2h_worker);
 
+	ct_trace_rx(ct, "worker-enter", 0, 0);
 	receive_g2h(ct);
+	ct_trace_rx(ct, "worker-exit", 0, 0);
 }
 
 static struct xe_guc_ct_snapshot *guc_ct_snapshot_alloc(struct xe_guc_ct *ct, bool atomic,

@@ -18,6 +18,7 @@
 #include "xe_hw_engine.h"
 #include "xe_memirq.h"
 #include "xe_tile_printk.h"
+#include "xe_trace_guc.h"
 
 #define memirq_assert(m, condition)	xe_tile_assert(memirq_to_tile(m), condition)
 #define memirq_printk(m, _level, _fmt, ...)			\
@@ -545,6 +546,34 @@ static void memirq_dump_source_pages(struct xe_memirq *memirq)
 	}
 }
 
+/* Called from the IRQ handler or a CT sender that owns the live buffers. */
+void xe_memirq_trace(struct xe_memirq *memirq, const char *phase)
+{
+	struct xe_device *xe = memirq_to_xe(memirq);
+	struct xe_tile *tile = memirq_to_tile(memirq);
+	bool irq_enabled;
+	u8 source = 0, media_source = 0, status = 0, media_status = 0;
+
+	if (!trace_xe_memirq_rx_enabled())
+		return;
+	irq_enabled = atomic_read(&xe->irq.enabled);
+	/* Disabled IRQs can race buffer destruction: do not dereference the BO. */
+	if (irq_enabled && memirq->bo) {
+		source = iosys_map_rd(&memirq->source, ilog2(INTR_GUC), u8);
+		status = iosys_map_rd(&memirq->bo->vmap,
+			XE_MEMIRQ_VECTOR_OFFSET(0, ilog2(INTR_GUC)) +
+			ilog2(GUC_INTR_GUC2HOST), u8);
+		if (tile->media_gt) {
+			media_source = iosys_map_rd(&memirq->source, ilog2(INTR_MGUC), u8);
+			media_status = iosys_map_rd(&memirq->bo->vmap,
+				XE_MEMIRQ_VECTOR_OFFSET(0, ilog2(INTR_MGUC)) +
+				ilog2(GUC_INTR_GUC2HOST), u8);
+		}
+	}
+	trace_xe_memirq_rx(xe, tile->id, phase, irq_enabled, READ_ONCE(memirq->enabled),
+			   !!memirq->bo, source, media_source, status, media_status);
+}
+
 /**
  * xe_memirq_handler - The `Memory Based Interrupts`_ Handler.
  * @memirq: the &xe_memirq
@@ -564,6 +593,7 @@ void xe_memirq_handler(struct xe_memirq *memirq)
 	if (!memirq->bo)
 		return;
 
+	xe_memirq_trace(memirq, "dispatch");
 	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_MEMIRQ))
 		memirq_dump_source_pages(memirq);
 
