@@ -34,6 +34,10 @@ struct xe_modparam xe_modparam = {
 	.xelp_enable_ccs = -1,
 };
 
+module_param_named_unsafe(mtl_vf_native, xe_modparam.mtl_vf_native, bool, 0400);
+MODULE_PARM_DESC(mtl_vf_native,
+		 "Enable experimental full MTL VF probe with PF-mediated GGTT updates");
+
 module_param_named(svm_notifier_size, xe_modparam.svm_notifier_size, uint, 0600);
 MODULE_PARM_DESC(svm_notifier_size, "Set the svm notifier size in MiB, must be power of 2 "
 		 "[default=" __stringify(XE_DEFAULT_SVM_NOTIFIER_SIZE) "]");

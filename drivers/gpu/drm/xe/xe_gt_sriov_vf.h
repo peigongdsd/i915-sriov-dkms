@@ -10,9 +10,14 @@
 
 struct drm_printer;
 struct xe_gt;
+struct xe_device;
 struct xe_reg;
 struct xe_uc_fw_version;
 
+bool xe_gt_sriov_vf_native(struct xe_device *xe);
+void xe_gt_sriov_vf_retain(struct xe_gt *gt, const char *stage, int err) __noreturn;
+void xe_gt_sriov_vf_update_ggtt(struct xe_gt *gt, u32 page, u64 pte,
+				   unsigned int count, bool replicate);
 int xe_gt_sriov_vf_reset(struct xe_gt *gt);
 int xe_gt_sriov_vf_bootstrap(struct xe_gt *gt);
 void xe_gt_sriov_vf_guc_versions(struct xe_gt *gt,

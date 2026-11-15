@@ -69,6 +69,7 @@
 #include "xe_svm.h"
 #include "xe_sysctrl.h"
 #include "xe_tile.h"
+#include "xe_tile_printk.h"
 #include "xe_ttm_stolen_mgr.h"
 #include "xe_ttm_sys_mgr.h"
 #include "xe_vm.h"
@@ -226,6 +227,8 @@ static long xe_drm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	if (xe_device_wedged(xe))
 		return -ECANCELED;
+	if (xe_ggtt_vf_failed(xe))
+		return -EIO;
 
 	ACQUIRE(xe_pm_runtime_ioctl, pm)(xe);
 	ret = ACQUIRE_ERR(xe_pm_runtime_ioctl, &pm);
@@ -244,6 +247,8 @@ static long xe_drm_compat_ioctl(struct file *file, unsigned int cmd, unsigned lo
 
 	if (xe_device_wedged(xe))
 		return -ECANCELED;
+	if (xe_ggtt_vf_failed(xe))
+		return -EIO;
 
 	ACQUIRE(xe_pm_runtime_ioctl, pm)(xe);
 	ret = ACQUIRE_ERR(xe_pm_runtime_ioctl, &pm);
@@ -1015,6 +1020,8 @@ int xe_device_probe(struct xe_device *xe)
 		err = xe_ggtt_init_early(tile->mem.ggtt);
 		if (err)
 			return err;
+		if (IS_SRIOV_VF(xe))
+			xe_tile_dbg(tile, "MTL VF: early GGTT setup completed\n");
 	}
 
 	/*
@@ -1083,6 +1090,9 @@ int xe_device_probe(struct xe_device *xe)
 
 	for_each_gt(gt, xe, id) {
 		err = xe_gt_init(gt);
+		if (xe_gt_sriov_vf_native(xe))
+			xe_gt_dbg(gt, "MTL VF: native GT initialization returned %d\n",
+				   err);
 		if (err)
 			return err;
 	}

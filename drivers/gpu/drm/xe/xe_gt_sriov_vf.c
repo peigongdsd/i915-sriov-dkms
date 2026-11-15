@@ -5,6 +5,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/bsearch.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 
 #include <drm/drm_managed.h>
@@ -15,6 +16,7 @@
 #include "abi/guc_klvs_abi.h"
 #include "abi/guc_relay_actions_abi.h"
 #include "regs/xe_gt_regs.h"
+#include "regs/xe_gtt_defs.h"
 
 #include "xe_assert.h"
 #include "xe_device.h"
@@ -31,6 +33,7 @@
 #include "xe_lrc.h"
 #include "xe_memirq.h"
 #include "xe_mmio.h"
+#include "xe_module.h"
 #include "xe_sriov.h"
 #include "xe_sriov_vf.h"
 #include "xe_sriov_vf_ccs.h"
@@ -93,12 +96,15 @@ static int vf_reset_guc_state(struct xe_gt *gt)
 	struct xe_guc *guc = &gt->uc.guc;
 	int err;
 
+	WRITE_ONCE(gt->sriov.vf.ggtt_relay_ready, false);
 	do {
 		err = guc_action_vf_reset(guc);
 		if (!err || err != -ETIMEDOUT)
 			break;
 	} while (--retry);
 
+	if (xe_gt_sriov_vf_native(gt_to_xe(gt)))
+		xe_gt_dbg(gt, "MTL VF: normal GuC VF reset returned %d\n", err);
 	if (unlikely(err))
 		xe_gt_sriov_err(gt, "Failed to reset GuC state (%pe)\n", ERR_PTR(err));
 	return err;
@@ -118,6 +124,141 @@ int xe_gt_sriov_vf_reset(struct xe_gt *gt)
 		return -ENODEV;
 
 	return vf_reset_guc_state(gt);
+}
+
+static int vf_handshake_with_guc(struct xe_gt *gt);
+
+/* Serialized GGTT relay before CT setup or after consumer reset. */
+static int vf_mmio_relay(struct xe_gt *gt, u8 opcode, u8 magic,
+			      u32 data1, u32 data2, u32 data3, u32 *response)
+{
+	u32 request[VF2GUC_MMIO_RELAY_SERVICE_REQUEST_MSG_LEN] = {
+		FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_REQUEST) |
+		FIELD_PREP(GUC_HXG_REQUEST_MSG_0_ACTION, GUC_ACTION_VF2GUC_MMIO_RELAY_SERVICE) |
+		FIELD_PREP(VF2GUC_MMIO_RELAY_SERVICE_MSG_0_MAGIC, magic) |
+		FIELD_PREP(VF2GUC_MMIO_RELAY_SERVICE_REQUEST_MSG_0_OPCODE, opcode),
+		data1, data2, data3,
+	};
+	int ret;
+
+	ret = xe_guc_mmio_send_recv_once(&gt->uc.guc, request, ARRAY_SIZE(request), response);
+	if (ret < 0)
+		return ret;
+	if (FIELD_GET(VF2GUC_MMIO_RELAY_SERVICE_MSG_0_MAGIC, response[0]) != magic)
+		return -EPROTO;
+
+	return FIELD_GET(VF2GUC_MMIO_RELAY_SERVICE_RESPONSE_MSG_0_DATA0, response[0]);
+}
+
+noinline __noreturn void xe_gt_sriov_vf_retain(struct xe_gt *gt,
+					       const char *stage, int err)
+{
+	DECLARE_COMPLETION_ONSTACK(hold);
+
+	xe_gt_err(gt,
+		  "MTL VF: %s failed (%d); retaining operation and backing; device removal is not safe\n",
+		  stage, err);
+	/*
+	 * Do not unwind or retry. The retained operation keeps its BO, DMA
+	 * mapping, GGTT node and device infrastructure. No reference-count
+	 * quarantine can substitute for cancelling a queued PF update.
+	 * This completion is deliberately never signalled. Recovery is outside
+	 * this candidate; device removal must not release the live backing.
+	 */
+	for (;;)
+		wait_for_completion(&hold);
+}
+
+bool xe_gt_sriov_vf_native(struct xe_device *xe)
+{
+	return xe_modparam.mtl_vf_native && IS_SRIOV_VF(xe) &&
+	       xe->info.platform == XE_METEORLAKE;
+}
+
+/* The existing ABI carries the same descriptor/PTE over CT as over MMIO. */
+static void vf_ct_update_ggtt(struct xe_gt *gt, u32 desc, u64 pte, u32 count)
+{
+	u32 request[] = {
+		FIELD_PREP(GUC_HXG_MSG_0_ORIGIN, GUC_HXG_ORIGIN_HOST) |
+		FIELD_PREP(GUC_HXG_MSG_0_TYPE, GUC_HXG_TYPE_REQUEST) |
+		FIELD_PREP(GUC_HXG_REQUEST_MSG_0_ACTION, GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32),
+		desc, lower_32_bits(pte), upper_32_bits(pte),
+	};
+	u32 response = 0;
+	int ret;
+
+	ret = xe_guc_relay_send_to_pf_once(&gt->uc.guc.relay, request,
+					 ARRAY_SIZE(request), &response, 1);
+	if (ret != 1 ||
+	    FIELD_GET(GUC_HXG_MSG_0_ORIGIN, response) != GUC_HXG_ORIGIN_HOST ||
+	    FIELD_GET(GUC_HXG_MSG_0_TYPE, response) != GUC_HXG_TYPE_RESPONSE_SUCCESS ||
+	    FIELD_GET(GUC_HXG_RESPONSE_MSG_0_DATA0, response) != count)
+		xe_ggtt_vf_fail(gt, "CT GGTT batch", ret < 0 ? ret : -EPROTO);
+	xe_gt_dbg(gt, "MTL VF: CT GGTT acknowledged page=%#x pages=%u replicate=%u\n",
+		   (u32)FIELD_GET(VF2PF_UPDATE_GGTT32_OFFSET, desc), count,
+		   (u32)FIELD_GET(VF2PF_UPDATE_GGTT32_MODE, desc));
+}
+
+/* Called with the GGTT lock held throughout each request and acknowledgment. */
+void xe_gt_sriov_vf_update_ggtt(struct xe_gt *gt, u32 page, u64 pte,
+				   unsigned int count, bool replicate)
+{
+	struct xe_gt_sriov_vf *vf = &gt->sriov.vf;
+	u32 response[GUC_MAX_MMIO_MSG_LEN] = {};
+	u32 desc;
+	int ret;
+
+	if (xe_ggtt_vf_failed(gt_to_xe(gt)))
+		xe_ggtt_vf_fail(gt, "GGTT already failed", -EIO);
+	if (!count || count > FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1 ||
+	    !FIELD_FIT(VF2PF_UPDATE_GGTT32_OFFSET, page))
+		xe_ggtt_vf_fail(gt, "invalid GGTT batch", -EINVAL);
+
+	if ((u64)page + count > xe_tile_sriov_vf_ggtt(gt->tile) / SZ_4K ||
+	    (u64)page + count > (u64)FIELD_MAX(VF2PF_UPDATE_GGTT32_OFFSET) + 1 ||
+	    !(pte & XE_PAGE_PRESENT) ||
+	    pte & ~(GENMASK_ULL(45, 12) | XELPG_GGTT_PTE_PAT0 |
+		    XELPG_GGTT_PTE_PAT1 | XE_PAGE_PRESENT) ||
+	    (replicate && (u64)(count - 1) * SZ_4K >
+	     GENMASK_ULL(45, 12) - (pte & GENMASK_ULL(45, 12))))
+		xe_ggtt_vf_fail(gt, "invalid GGTT range or PTE", -ERANGE);
+
+	desc = FIELD_PREP(VF2PF_UPDATE_GGTT32_OFFSET, page) |
+	       FIELD_PREP(VF2PF_UPDATE_GGTT32_COPIES, count - 1) |
+	       FIELD_PREP(VF2PF_UPDATE_GGTT32_MODE,
+			  replicate ? VF2PF_UPDATE_GGTT32_REPLICATE : 0);
+	if (xe_guc_ct_enabled(&gt->uc.guc.ct)) {
+		vf_ct_update_ggtt(gt, desc, pte, count);
+		return;
+	}
+
+	if (!vf->ggtt_relay_ready) {
+		if (xe_gt_sriov_vf_native(gt_to_xe(gt))) {
+			/* Normal teardown may have reset GuC before this BO is freed. */
+			xe_gt_dbg(gt, "MTL VF: MMIO GGTT interface restore page=%#x pages=%u\n",
+				   page, count);
+			ret = vf_handshake_with_guc(gt);
+			if (ret)
+				xe_ggtt_vf_fail(gt, "MMIO GGTT GuC interface", ret);
+			xe_gt_dbg(gt, "MTL VF: MMIO GGTT GuC interface restored\n");
+		}
+		ret = vf_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_HANDSHAKE,
+					 ++vf->ggtt_magic & 0xf,
+					 FIELD_PREP(VF2PF_MMIO_HANDSHAKE_REQUEST_MSG_1_MAJOR, 1),
+					 0, 0, response);
+		if (ret || response[1] !=
+		    FIELD_PREP(VF2PF_MMIO_HANDSHAKE_RESPONSE_MSG_1_MAJOR, 1))
+			xe_ggtt_vf_fail(gt, "MMIO relay handshake", ret ?: -EPROTO);
+		vf->ggtt_relay_ready = true;
+		xe_gt_dbg(gt, "MTL VF: MMIO relay ready\n");
+	}
+
+	ret = vf_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_UPDATE_GGTT,
+				 ++vf->ggtt_magic & 0xf, desc,
+				 lower_32_bits(pte), upper_32_bits(pte), response);
+	if (ret != count)
+		xe_ggtt_vf_fail(gt, "MMIO GGTT batch", ret);
 }
 
 static int guc_action_match_version(struct xe_guc *guc,
@@ -296,11 +437,15 @@ int xe_gt_sriov_vf_bootstrap(struct xe_gt *gt)
 	if (!xe_device_uc_enabled(gt_to_xe(gt)))
 		return -ENODEV;
 
+	xe_gt_dbg(gt, "MTL VF: before reset\n");
 	err = vf_reset_guc_state(gt);
+	xe_gt_dbg(gt, "MTL VF: reset returned %d\n", err);
 	if (unlikely(err))
 		return err;
 
+	xe_gt_dbg(gt, "MTL VF: before version handshake\n");
 	err = vf_handshake_with_guc(gt);
+	xe_gt_dbg(gt, "MTL VF: handshake returned %d\n", err);
 	if (unlikely(err))
 		return err;
 
@@ -494,13 +639,19 @@ static int vf_get_ggtt_info(struct xe_gt *gt)
 
 	xe_gt_assert(gt, IS_SRIOV_VF(gt_to_xe(gt)));
 
+	xe_gt_dbg(gt, "MTL VF: before GGTT start query\n");
 	err = guc_action_query_single_klv64(guc, GUC_KLV_VF_CFG_GGTT_START_KEY, &start);
+	xe_gt_dbg(gt, "MTL VF: GGTT start query returned %d\n", err);
 	if (unlikely(err))
 		return err;
 
+	xe_gt_dbg(gt, "MTL VF: before GGTT size query\n");
 	err = guc_action_query_single_klv64(guc, GUC_KLV_VF_CFG_GGTT_SIZE_KEY, &size);
+	xe_gt_dbg(gt, "MTL VF: GGTT size query returned %d\n", err);
 	if (unlikely(err))
 		return err;
+
+	xe_gt_dbg(gt, "MTL VF: GGTT base=%#llx size=%#llx\n", start, size);
 
 	if (!size)
 		return -ENODATA;

@@ -744,7 +744,9 @@ static int vf_guc_init_noalloc(struct xe_guc *guc)
 	if (err)
 		return err;
 
+	xe_gt_dbg(gt, "MTL VF: before VF config query\n");
 	err = xe_gt_sriov_vf_query_config(gt);
+	xe_gt_dbg(gt, "MTL VF: VF config query returned %d\n", err);
 	if (err)
 		return err;
 
@@ -1446,7 +1448,12 @@ int xe_guc_softreset(struct xe_guc *guc)
 	if (!xe_uc_fw_is_running(&guc->fw))
 		return 0;
 
+	/* A later native GGTT clear must reestablish both relay interfaces. */
+	if (xe_gt_sriov_vf_native(guc_to_xe(guc)))
+		WRITE_ONCE(guc_to_gt(guc)->sriov.vf.ggtt_relay_ready, false);
 	ret = xe_guc_mmio_send(guc, action, ARRAY_SIZE(action));
+	if (xe_gt_sriov_vf_native(guc_to_xe(guc)))
+		xe_gt_dbg(guc_to_gt(guc), "MTL VF: normal GuC soft reset returned %d\n", ret);
 	if (ret)
 		return ret;
 
@@ -1663,7 +1670,7 @@ int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *request,
 ALLOW_ERROR_INJECTION(xe_guc_mmio_send_recv, ERRNO);
 
 /*
- * Diagnostic transactions must not replay an update after a lost response.
+ * GGTT transactions must not replay an update after a lost response.
  * A negative return does not imply that the original request was cancelled.
  */
 int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *request,

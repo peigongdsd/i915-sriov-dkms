@@ -24,7 +24,9 @@
 #include "xe_bo.h"
 #include "xe_force_wake.h"
 #include "xe_gt_printk.h"
+#include "xe_gt_sriov_vf.h"
 #include "xe_gt_types.h"
+#include "xe_guc_ct.h"
 #include "xe_map.h"
 #include "xe_mmio.h"
 #include "xe_pat.h"
@@ -88,6 +90,9 @@ struct xe_ggtt_node {
 	struct work_struct delayed_removal_work;
 	/** @invalidate_on_remove: If it needs invalidation upon removal */
 	bool invalidate_on_remove;
+	/** @vf_mapped: Acknowledged PF mapping; backing must remain until cleared. */
+	bool vf_mapped;
+
 };
 
 /**
@@ -129,6 +134,10 @@ struct xe_ggtt {
 	unsigned int flags;
 	/** @scratch: Internal object allocation used as a scratch page */
 	struct xe_bo *scratch;
+	/** @vf_failed: An uncertain VF update forbids further GGTT submissions. */
+	bool vf_failed;
+	/** @vf_scratch_mapped: Scratch backing must survive all GGTT holes. */
+	bool vf_scratch_mapped;
 	/** @lock: Mutex lock to protect GGTT data */
 	struct mutex lock;
 	/**
@@ -145,6 +154,37 @@ struct xe_ggtt {
 	/** @wq: Dedicated unordered work queue to process node removals */
 	struct workqueue_struct *wq;
 };
+
+bool xe_ggtt_vf_failed(struct xe_device *xe)
+{
+	struct xe_tile *tile;
+	u8 id;
+
+	if (!xe_gt_sriov_vf_native(xe))
+		return false;
+	for_each_tile(tile, xe, id)
+		if (tile->mem.ggtt && READ_ONCE(tile->mem.ggtt->vf_failed))
+			return true;
+	return false;
+}
+
+/*
+ * Do not return into TTM destruction while the PF may still reference backing.
+ * Retain this operation, but let unrelated clients leave the GGTT mutex and
+ * fail new ioctls. This is diagnostic containment, not reset or unmap recovery.
+ */
+__noreturn void xe_ggtt_vf_fail(struct xe_gt *gt, const char *stage, int err)
+{
+	struct xe_ggtt *ggtt = gt->tile->mem.ggtt;
+
+	lockdep_assert_held(&ggtt->lock);
+	if (xe_gt_sriov_vf_native(gt_to_xe(gt))) {
+		WRITE_ONCE(ggtt->vf_failed, true);
+		mutex_unlock(&ggtt->lock);
+		xe_gt_err(gt, "MTL VF: GGTT failed; shared mutex released, new ioctls rejected; retaining affected operation\n");
+	}
+	xe_gt_sriov_vf_retain(gt, stage, err);
+}
 
 static u64 xelp_ggtt_pte_flags(struct xe_bo *bo, u16 pat_index)
 {
@@ -240,6 +280,14 @@ u64 xe_ggtt_size(struct xe_ggtt *ggtt)
 
 static void xe_ggtt_set_pte(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 {
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile))) {
+		lockdep_assert_held(&ggtt->lock);
+		xe_tile_assert(ggtt->tile, addr >= ggtt->start);
+		xe_gt_sriov_vf_update_ggtt(ggtt->tile->primary_gt,
+					       (addr - ggtt->start) >> XE_PTE_SHIFT,
+					       pte ?: XE_PAGE_PRESENT, 1, false);
+		return;
+	}
 	xe_tile_assert(ggtt->tile, !(addr & XE_PTE_MASK));
 	xe_tile_assert(ggtt->tile, addr < ggtt->start + ggtt->size);
 
@@ -249,31 +297,67 @@ static void xe_ggtt_set_pte(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 static void xe_ggtt_set_pte_and_flush(struct xe_ggtt *ggtt, u64 addr, u64 pte)
 {
 	xe_ggtt_set_pte(ggtt, addr, pte);
-	ggtt_update_access_counter(ggtt);
+	if (!xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile)))
+		ggtt_update_access_counter(ggtt);
 }
 
 static u64 xe_ggtt_get_pte(struct xe_ggtt *ggtt, u64 addr)
 {
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile)))
+		xe_gt_sriov_vf_retain(ggtt->tile->primary_gt,
+					   "unexpected direct GGTT access", -EOPNOTSUPP);
+
 	xe_tile_assert(ggtt->tile, !(addr & XE_PTE_MASK));
 	xe_tile_assert(ggtt->tile, addr < ggtt->start + ggtt->size);
 
 	return readq(&ggtt->gsm[addr >> XE_PTE_SHIFT]);
 }
 
-static void xe_ggtt_clear(struct xe_ggtt *ggtt, u64 start, u64 size)
+static u64 xe_ggtt_scratch_pte(struct xe_ggtt *ggtt)
 {
 	u16 pat_index = xe_cache_pat_idx(tile_to_xe(ggtt->tile), XE_CACHE_WB);
+
+	if (!ggtt->scratch)
+		return 0;
+	return xe_bo_addr(ggtt->scratch, 0, XE_PAGE_SIZE) |
+		ggtt->pt_ops->pte_encode_flags(ggtt->scratch, pat_index);
+}
+
+/* Duplicate one PTE per page; never advance the scratch DMA address. */
+static void vf_ggtt_fill(struct xe_ggtt *ggtt, u64 start, u64 size, u64 pte)
+{
+	u64 offset;
+	u32 page, left;
+
+	lockdep_assert_held(&ggtt->lock);
+	if (start < ggtt->start || !IS_ALIGNED(start, XE_PAGE_SIZE) ||
+	    !IS_ALIGNED(size, XE_PAGE_SIZE))
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt, "invalid GGTT fill", -EINVAL);
+	offset = start - ggtt->start;
+	if (offset > ggtt->size || size > ggtt->size - offset)
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt, "GGTT fill outside allocation",
+					   -ERANGE);
+	page = offset >> XE_PTE_SHIFT;
+	left = size >> XE_PTE_SHIFT;
+	while (left) {
+		u32 count = min_t(u32, left, FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1);
+
+		xe_gt_sriov_vf_update_ggtt(ggtt->tile->primary_gt, page, pte, count, false);
+		page += count;
+		left -= count;
+	}
+}
+
+static void xe_ggtt_clear(struct xe_ggtt *ggtt, u64 start, u64 size)
+{
 	u64 end = start + size - 1;
-	u64 scratch_pte;
+	u64 scratch_pte = xe_ggtt_scratch_pte(ggtt);
 
 	xe_tile_assert(ggtt->tile, start < end);
-
-	if (ggtt->scratch)
-		scratch_pte = xe_bo_addr(ggtt->scratch, 0, XE_PAGE_SIZE) |
-			      ggtt->pt_ops->pte_encode_flags(ggtt->scratch,
-							     pat_index);
-	else
-		scratch_pte = 0;
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile))) {
+		vf_ggtt_fill(ggtt, start, size, scratch_pte ?: XE_PAGE_PRESENT);
+		return;
+	}
 
 	while (start < end) {
 		ggtt->pt_ops->ggtt_set_pte(ggtt, start, scratch_pte);
@@ -329,6 +413,30 @@ static void ggtt_fini(void *arg)
 {
 	struct xe_ggtt *ggtt = arg;
 
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile)) && ggtt->vf_scratch_mapped) {
+		struct drm_mm_node *node;
+		u64 start, end;
+
+		guard(mutex)(&ggtt->lock);
+		drm_mm_for_each_hole(node, &ggtt->mm, start, end)
+			vf_ggtt_fill(ggtt, ggtt->start + start, end - start,
+					  XE_PAGE_PRESENT);
+		/* Unmapped BOs may still have a deferred software node removal. */
+		drm_mm_for_each_node(node, &ggtt->mm) {
+			struct xe_ggtt_node *entry = container_of(node, struct xe_ggtt_node, base);
+
+			if (!entry->vf_mapped)
+				vf_ggtt_fill(ggtt, ggtt->start + node->start,
+						  node->size, XE_PAGE_PRESENT);
+		}
+		ggtt->vf_scratch_mapped = false;
+		xe_tile_dbg(ggtt->tile, "MTL VF: scratch references cleared at normal GGTT fini\n");
+	}
+	if (ggtt->vf_scratch_mapped) {
+		guard(mutex)(&ggtt->lock);
+
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt, "scratch still mapped at fini", -EBUSY);
+	}
 	ggtt->scratch = NULL;
 }
 
@@ -398,6 +506,12 @@ int xe_ggtt_init_early(struct xe_ggtt *ggtt)
 	unsigned int gsm_size = 0;
 	u64 ggtt_start, wopcm = xe_wopcm_size(xe), ggtt_size, top = GUC_GGTT_TOP;
 	int err;
+
+	if (IS_SRIOV_VF(xe) && xe->info.platform == XE_METEORLAKE &&
+	    !xe_gt_sriov_vf_native(xe)) {
+		xe_tile_err(ggtt->tile, "MTL native VF support requires mtl_vf_native=1\n");
+		return -EOPNOTSUPP;
+	}
 
 	if (!IS_SRIOV_VF(xe)) {
 		if (GRAPHICS_VERx100(xe) >= 1250)
@@ -477,15 +591,86 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt);
 static void xe_ggtt_initial_clear(struct xe_ggtt *ggtt)
 {
 	struct drm_mm_node *hole;
-	u64 start, end;
+	u64 start, end, pages = 0;
+	bool native = xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile));
 
 	/* Display may have allocated inside ggtt, so be careful with clearing here */
 	mutex_lock(&ggtt->lock);
-	drm_mm_for_each_hole(hole, &ggtt->mm, start, end)
+	if (native)
+		ggtt->vf_scratch_mapped = true;
+	drm_mm_for_each_hole(hole, &ggtt->mm, start, end) {
 		xe_ggtt_clear(ggtt, ggtt->start + start, end - start);
+		pages += (end - start) >> XE_PTE_SHIFT;
+	}
+	if (native)
+		xe_tile_dbg(ggtt->tile, "MTL VF: scratch holes acknowledged pages=%llu managed_pages=%llu pte=%#llx\n",
+			     pages, ggtt->size >> XE_PTE_SHIFT, xe_ggtt_scratch_pte(ggtt));
 
 	xe_ggtt_invalidate(ggtt);
 	mutex_unlock(&ggtt->lock);
+}
+
+/* All updates below are serialized by the existing GGTT lock. */
+static void vf_ggtt_unmap_node(struct xe_ggtt_node *node)
+{
+	struct xe_ggtt *ggtt = node->ggtt;
+	u64 pte = ggtt->vf_scratch_mapped ? xe_ggtt_scratch_pte(ggtt) : XE_PAGE_PRESENT;
+
+	lockdep_assert_held(&ggtt->lock);
+	if (!node->vf_mapped)
+		return;
+	vf_ggtt_fill(ggtt, ggtt->start + node->base.start, node->base.size, pte);
+	node->vf_mapped = false;
+	if (xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct)) {
+		xe_tile_dbg(ggtt->tile, "MTL VF: CT clear before TTM backing release relative=%#llx pages=%llu scratch=%u\n",
+			     node->base.start, node->base.size >> XE_PTE_SHIFT,
+			     ggtt->vf_scratch_mapped);
+	}
+	xe_tile_dbg(ggtt->tile, "MTL VF: unmap acknowledged relative=%#llx pages=%llu\n",
+		     node->base.start, node->base.size >> XE_PTE_SHIFT);
+}
+
+/* BO reservation held by the TTM eviction/shrinker caller. */
+bool xe_ggtt_vf_bo_mapped(struct xe_bo *bo)
+{
+	struct xe_device *xe = xe_bo_device(bo);
+	struct xe_tile *tile;
+	u8 id;
+
+	if (!xe_gt_sriov_vf_native(xe))
+		return false;
+	for_each_tile(tile, xe, id) {
+		struct xe_ggtt *ggtt = tile->mem.ggtt;
+
+		if (ggtt && READ_ONCE(ggtt->scratch) == bo && READ_ONCE(ggtt->vf_scratch_mapped))
+			return true;
+		if (bo->ggtt_node[id] && READ_ONCE(bo->ggtt_node[id]->vf_mapped))
+			return true;
+	}
+	return false;
+}
+
+/* TTM calls this before destroying the DMA backing, not in bo->destroy(). */
+void xe_ggtt_vf_unmap_bo(struct xe_bo *bo)
+{
+	struct xe_device *xe = xe_bo_device(bo);
+	struct xe_tile *tile;
+	u8 id;
+
+	if (!xe_gt_sriov_vf_native(xe))
+		return;
+	for_each_tile(tile, xe, id) {
+		struct xe_ggtt_node *node = bo->ggtt_node[id];
+		struct xe_ggtt *ggtt = tile->mem.ggtt;
+
+		if (ggtt && READ_ONCE(ggtt->scratch) == bo && READ_ONCE(ggtt->vf_scratch_mapped))
+			xe_gt_sriov_vf_retain(tile->primary_gt,
+						   "scratch backing released while mapped", -EBUSY);
+		if (!node || !READ_ONCE(node->vf_mapped))
+			continue;
+		scoped_guard(mutex, &node->ggtt->lock)
+			vf_ggtt_unmap_node(node);
+	}
 }
 
 static void ggtt_node_fini(struct xe_ggtt_node *node)
@@ -500,7 +685,11 @@ static void ggtt_node_remove(struct xe_ggtt_node *node)
 
 	mutex_lock(&ggtt->lock);
 	bound = ggtt->flags & XE_GGTT_FLAGS_ONLINE;
-	if (bound)
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile))) {
+		if (node->vf_mapped)
+			xe_ggtt_vf_fail(ggtt->tile->primary_gt,
+						   "late mapped-node removal", -EBUSY);
+	} else if (bound)
 		xe_ggtt_clear(ggtt, xe_ggtt_node_addr(node), xe_ggtt_node_size(node));
 	drm_mm_remove_node(&node->base);
 	node->base.size = 0;
@@ -627,6 +816,9 @@ static void xe_ggtt_invalidate(struct xe_ggtt *ggtt)
 	bool use_mmio = IS_SRIOV_PF(xe) && xe->info.platform == XE_METEORLAKE &&
 			MEDIA_VERx100(xe) == 1300;
 
+	if (xe_gt_sriov_vf_native(xe))
+		return;
+
 	xe_ggtt_flush_writes(ggtt);
 
 	/* Match the working MTL PF path when assigning VF GGTT ownership. */
@@ -724,6 +916,42 @@ size_t xe_ggtt_node_pt_size(const struct xe_ggtt_node *node)
 	return node->base.size / XE_PAGE_SIZE * sizeof(u64);
 }
 
+static void vf_ggtt_map_bo(struct xe_ggtt *ggtt, struct xe_bo *bo, u64 flags)
+{
+	struct xe_ggtt_node *node = bo->ggtt_node[ggtt->tile->id];
+	struct xe_res_cursor cur;
+	u32 page = node->base.start >> XE_PTE_SHIFT;
+	u32 count = 0, requests = 0;
+	u64 first = 0;
+
+	lockdep_assert_held(&ggtt->lock);
+	for (xe_res_first_sg(xe_bo_sg(bo), 0, xe_bo_size(bo), &cur);
+	     cur.remaining; xe_res_next(&cur, XE_PAGE_SIZE)) {
+		u64 dma = xe_res_dma(&cur);
+
+		if (count && (dma != first + (u64)count * XE_PAGE_SIZE ||
+			      count == FIELD_MAX(VF2PF_UPDATE_GGTT32_COPIES) + 1)) {
+			xe_gt_sriov_vf_update_ggtt(ggtt->tile->primary_gt, page,
+						       flags | first, count, true);
+			page += count;
+			requests++;
+			count = 0;
+		}
+		if (!count)
+			first = dma;
+		count++;
+	}
+	if (count) {
+		xe_gt_sriov_vf_update_ggtt(ggtt->tile->primary_gt, page,
+					       flags | first, count, true);
+		requests++;
+	}
+	node->vf_mapped = true;
+	xe_tile_dbg(ggtt->tile,
+		     "MTL VF: map acknowledged relative=%#llx pages=%zu requests=%u\n",
+		     node->base.start, xe_bo_size(bo) >> XE_PTE_SHIFT, requests);
+}
+
 /**
  * xe_ggtt_map_bo - Map the BO into GGTT
  * @ggtt: the &xe_ggtt where node will be mapped
@@ -739,6 +967,10 @@ static void xe_ggtt_map_bo(struct xe_ggtt *ggtt, struct xe_ggtt_node *node,
 
 	if (XE_WARN_ON(!node))
 		return;
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile))) {
+		vf_ggtt_map_bo(ggtt, bo, pte);
+		return;
+	}
 
 	start = xe_ggtt_node_addr(node);
 	end = start + xe_bo_size(bo);
@@ -803,6 +1035,10 @@ struct xe_ggtt_node *xe_ggtt_insert_node_transform(struct xe_ggtt *ggtt,
 	struct xe_ggtt_node *node;
 	int ret;
 
+	/* MTL VFs have no display or transformed-GGTT ABI. */
+	if (xe_gt_sriov_vf_native(tile_to_xe(ggtt->tile)))
+		return ERR_PTR(-EOPNOTSUPP);
+
 	node = ggtt_node_init(ggtt);
 	if (IS_ERR(node))
 		return ERR_CAST(node);
@@ -810,6 +1046,11 @@ struct xe_ggtt_node *xe_ggtt_insert_node_transform(struct xe_ggtt *ggtt,
 	if (mutex_lock_interruptible(&ggtt->lock) < 0) {
 		ret = -ERESTARTSYS;
 		goto err;
+	}
+
+	if (READ_ONCE(ggtt->vf_failed)) {
+		ret = -EIO;
+		goto err_unlock;
 	}
 
 	ret = xe_ggtt_insert_node_locked(node, size, align, 0);
@@ -834,6 +1075,8 @@ err:
 static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 				  u64 start, u64 end, struct drm_exec *exec)
 {
+	struct xe_device *xe = tile_to_xe(ggtt->tile);
+	bool native = xe_gt_sriov_vf_native(xe);
 	u64 alignment = bo->min_align > 0 ? bo->min_align : XE_PAGE_SIZE;
 	u8 tile_id = ggtt->tile->id;
 	int err;
@@ -850,6 +1093,9 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 	err = xe_bo_validate(bo, NULL, false, exec);
 	if (err)
 		return err;
+	if (native && (xe_bo_is_vram(bo) || xe_bo_is_stolen(bo) ||
+			  !bo->ttm.ttm || !xe_bo_sg(bo) || !xe_bo_sg(bo)->sgl))
+		return -EOPNOTSUPP;
 
 	xe_pm_runtime_get_noresume(tile_to_xe(ggtt->tile));
 
@@ -861,6 +1107,12 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 	}
 
 	mutex_lock(&ggtt->lock);
+	if (READ_ONCE(ggtt->vf_failed)) {
+		ggtt_node_fini(bo->ggtt_node[tile_id]);
+		bo->ggtt_node[tile_id] = NULL;
+		err = -EIO;
+		goto unlock;
+	}
 	/*
 	 * When inheriting the initial framebuffer, the framebuffer is
 	 * physically located at VRAM address 0, and usually at GGTT address 0 too.
@@ -891,8 +1143,13 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 		u16 pat_index = xe_cache_pat_idx(tile_to_xe(ggtt->tile), cache_mode);
 		u64 pte = ggtt->pt_ops->pte_encode_flags(bo, pat_index);
 
-		xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
+		if (native) {
+			vf_ggtt_map_bo(ggtt, bo, pte);
+		} else {
+			xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
+		}
 	}
+unlock:
 	mutex_unlock(&ggtt->lock);
 
 	if (!err && bo->flags & XE_BO_FLAG_GGTT_INVALIDATE)

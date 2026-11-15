@@ -1363,6 +1363,10 @@ xe_bo_eviction_valuable(struct ttm_buffer_object *bo, const struct ttm_place *pl
 	if (!xe_bo_is_xe_bo(bo))
 		return true;
 
+	/* Keep diagnostic DMA backing until delete_mem_notify clears the PTEs. */
+	if (xe_ggtt_vf_bo_mapped(ttm_to_xe_bo(bo)))
+		return false;
+
 	drm_gem_for_each_gpuvm_bo(vm_bo, &bo->base) {
 		if (xe_vm_is_validating(gpuvm_to_vm(vm_bo->vm)))
 			return false;
@@ -1853,6 +1857,8 @@ static void xe_ttm_bo_delete_mem_notify(struct ttm_buffer_object *ttm_bo)
 
 	if (!xe_bo_is_xe_bo(ttm_bo))
 		return;
+
+	xe_ggtt_vf_unmap_bo(bo);
 
 	if (IS_VF_CCS_READY(ttm_to_xe_device(ttm_bo->bdev)))
 		xe_sriov_vf_ccs_detach_bo(bo);

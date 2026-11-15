@@ -654,7 +654,9 @@ static int read_gmdid(struct xe_device *xe, enum xe_gmdid_type type, u32 *ver, u
 		if (err)
 			return err;
 
+		xe_gt_dbg(gt, "MTL VF: before GMD_ID query\n");
 		val = xe_gt_sriov_vf_gmdid(gt);
+		xe_gt_dbg(gt, "MTL VF: GMD_ID query returned %#x\n", val);
 	} else {
 		/*
 		 * GMD_ID is a GT register, but at this point in the driver
@@ -1288,7 +1290,12 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		return err;
 
+	if (xe_gt_sriov_vf_native(xe))
+		xe_info(xe, "MTL VF: native full probe using PF-mediated GGTT; pci_vf=%u\n",
+			pdev->is_virtfn);
 	err = xe_device_probe(xe);
+	if (xe_gt_sriov_vf_native(xe))
+		xe_info(xe, "MTL VF: native device probe returned %d\n", err);
 	if (err)
 		return err;
 
@@ -1296,6 +1303,8 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		goto err_driver_cleanup;
 
+	if (xe_gt_sriov_vf_native(xe))
+		xe_info(xe, "MTL VF: native probe complete; DRM registered and normal PM initialized\n");
 	return 0;
 
 err_driver_cleanup:
