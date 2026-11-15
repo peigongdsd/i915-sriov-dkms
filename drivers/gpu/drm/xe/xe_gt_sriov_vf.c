@@ -103,6 +103,8 @@ static int vf_reset_guc_state(struct xe_gt *gt)
 			break;
 	} while (--retry);
 
+	if (xe_gt_sriov_vf_native(gt_to_xe(gt)))
+		xe_gt_info(gt, "VFPROBE: normal GuC VF reset returned %d\n", err);
 	if (unlikely(err))
 		xe_gt_sriov_err(gt, "Failed to reset GuC state (%pe)\n", ERR_PTR(err));
 	return err;
@@ -295,6 +297,15 @@ void xe_gt_sriov_vf_bootstrap_update(struct xe_gt *gt, u32 page, u64 pte,
 	}
 
 	if (!vf->test_relay_ready) {
+		if (xe_gt_sriov_vf_native(gt_to_xe(gt))) {
+			/* Normal teardown may have reset GuC before this BO is freed. */
+			xe_gt_info(gt, "VFPROBE: MMIO GGTT interface restore page=%#x pages=%u\n",
+				   page, count);
+			ret = vf_handshake_with_guc(gt);
+			if (ret)
+				xe_gt_sriov_vf_test_hold(gt, "MMIO GGTT GuC interface", ret);
+			xe_gt_info(gt, "VFPROBE: MMIO GGTT GuC interface restored\n");
+		}
 		ret = vf_test_mmio_relay(gt, IOV_OPCODE_VF2PF_MMIO_HANDSHAKE,
 					 ++vf->test_magic & 0xf,
 					 FIELD_PREP(VF2PF_MMIO_HANDSHAKE_REQUEST_MSG_1_MAJOR, 1),

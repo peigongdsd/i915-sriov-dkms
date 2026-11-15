@@ -15,6 +15,8 @@ root = Path(__file__).resolve().parents[1]
 xe = root / 'drivers/gpu/drm/xe'
 vf = (xe / 'xe_gt_sriov_vf.c').read_text()
 ggtt = (xe / 'xe_ggtt.c').read_text()
+guc = (xe / 'xe_guc.c').read_text()
+softreset = guc[guc.index('int xe_guc_softreset('):guc.index('int xe_guc_suspend(')]
 helpers = vf[vf.index('static int vf_test_mmio_relay('):
              vf.index('/*\n * Test the working PF')]
 update = vf[vf.index('static void vf_test_ct_ggtt('):
@@ -49,6 +51,8 @@ constants += '\n' + '\n'.join(line for line in abi.splitlines()
                               if line.startswith('#define ') and ('VF2PF_UPDATE_GGTT32_' in line or 'GUC_RELAY_ACTION_VF2PF_UPDATE_GGTT32' in line))
 constants += '\n' + '\n'.join(line for line in (xe / 'xe_guc.h').read_text().splitlines()
                               if line.startswith(('#define MAKE_GUC_VER(', '#define MAKE_GUC_VER_STRUCT(')))
+constants += '\nenum {\n' + next(line for line in (xe / 'abi/guc_actions_abi.h').read_text().splitlines()
+                                      if 'XE_GUC_ACTION_CLIENT_SOFT_RESET =' in line) + '\n};\n'
 prefix = r'''
 #include <assert.h>
 #include <stddef.h>
@@ -90,6 +94,7 @@ typedef uint64_t u64;
 #define lower_32_bits(x) ((u32)(x))
 #define upper_32_bits(x) ((u32)((x) >> 32))
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x) = (v))
 #define scoped_guard(t,p) for (int scope=1; scope; scope=0)
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
 #define PTR_ERR(p) ((int)(intptr_t)(p))
@@ -113,13 +118,15 @@ struct xe_gt_sriov_vf {
 };
 struct xe_gt;
 struct xe_guc_relay { int unused; };
-struct xe_guc { bool ct; struct xe_gt *gt; struct xe_guc_relay relay; };
+struct xe_guc { bool fw; bool ct; struct xe_gt *gt; struct xe_guc_relay relay; };
 struct xe_tile;
 struct xe_device { struct { int platform; } info; struct xe_tile *tile; };
 enum { XE_TIGERLAKE, XE_PVC, XE_METEORLAKE };
 static struct xe_device device = {.info = {XE_METEORLAKE}};
 #define gt_to_xe(g) (&device)
 #define guc_to_gt(g) ((g)->gt)
+#define guc_to_xe(g) (&device)
+#define xe_uc_fw_is_running(f) (*(f))
 #define IS_SRIOV_VF(x) true
 struct xe_uc { struct xe_guc guc; };
 struct xe_gt { struct xe_tile *tile; struct { struct xe_gt_sriov_vf vf; } sriov; struct xe_uc uc; };
@@ -185,6 +192,15 @@ static bool fail_handshake, fail_reset, bad_count;
 static unsigned fail_reset_at;
 static bool guc_negotiated, pf_negotiated, fail_version, changed_version;
 static unsigned resets, disables, version_requests, version_queries, invalid_state;
+static unsigned softresets, interface_minor;
+static int softreset_error;
+static int xe_guc_mmio_send(struct xe_guc *guc, const u32 *req, u32 len)
+{
+    assert(len == 1 && req[0] == XE_GUC_ACTION_CLIENT_SOFT_RESET);
+    softresets++;
+    guc_negotiated = pf_negotiated = false;
+    return softreset_error;
+}
 static void xe_guc_ct_disable(bool *ct) { *ct = false; disables++; }
 static unsigned counts[4096];
 static int xe_guc_mmio_send_recv_once(struct xe_guc *guc, const u32 *req, u32 len, u32 *resp)
@@ -255,7 +271,8 @@ static int xe_guc_relay_send_to_pf_once(struct xe_guc_relay *relay, const u32 *r
 /* Exercise the real version encoder/validator; only firmware replies are fake. */
 static int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *req, u32 len, u32 *resp)
 {
-    assert(!guc->ct && resets >= 1 && disables == resets);
+    assert(!guc->ct);
+    if (!native_mode) assert(resets >= 1 && disables == resets);
     assert(len == VF2GUC_MATCH_VERSION_REQUEST_MSG_LEN);
     assert(FIELD_GET(GUC_HXG_REQUEST_MSG_0_ACTION, req[0]) == GUC_ACTION_VF2GUC_MATCH_VERSION);
     assert(!FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MBZ, req[1]));
@@ -264,14 +281,14 @@ static int xe_guc_mmio_send_recv(struct xe_guc *guc, const u32 *req, u32 len, u3
         version_queries++;
     } else {
         version_requests++;
-        assert(major == 1 && FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MINOR, req[1]) == 2);
+        assert(major == 1 && FIELD_GET(VF2GUC_MATCH_VERSION_REQUEST_MSG_1_MINOR, req[1]) == interface_minor);
         if (fail_version) return -ENXIO;
         guc_negotiated = true;
     }
     memset(resp, 0, GUC_MAX_MMIO_MSG_LEN * sizeof(u32));
     resp[0] = 0xf0000000u;
     resp[1] = FIELD_PREP(VF2GUC_MATCH_VERSION_RESPONSE_MSG_1_MAJOR, 1) |
-              FIELD_PREP(VF2GUC_MATCH_VERSION_RESPONSE_MSG_1_MINOR, changed_version ? 3 : 2);
+              FIELD_PREP(VF2GUC_MATCH_VERSION_RESPONSE_MSG_1_MINOR, interface_minor + changed_version);
     return 0;
 }
 static int vf_handshake_with_guc(struct xe_gt *gt);
@@ -296,6 +313,7 @@ static void setup(unsigned pages, bool fragmented)
 {
     memset(&gt, 0, sizeof(gt));
     gt.uc.guc.gt = &gt;
+    gt.uc.guc.fw = true;
     gt.sriov.vf.guc_version = (struct xe_uc_fw_version){0, 1, 2, 0};
     tile = (struct xe_tile){.primary_gt = &gt, .mem = {&ggtt}};
     gt.tile = &tile; device.tile = &tile;
@@ -308,6 +326,7 @@ static void setup(unsigned pages, bool fragmented)
     ct_requests = ct_fault = ct_fault_at = fail_reset_at = 0;
     fail_handshake = fail_reset = bad_count = false;
     resets = disables = version_requests = version_queries = invalid_state = 0;
+    softresets = 0; softreset_error = 0; interface_minor = 2;
     guc_negotiated = true;
     pf_negotiated = fail_version = changed_version = false;
 }
@@ -679,13 +698,81 @@ int main(void)
     xe_ggtt_vf_bootstrap_finish(&device);
     assert(!resets && !updates && node.test_mapped);
     puts("PASS native mode never invokes diagnostic whole-range cleanup");
+
+
+    /* Reproduce the captured -ENXIO before any PF handshake or PTE clear. */
+    lifetime_setup(); native_mode=true; gt.uc.guc.ct=false;
+    gt.sriov.vf.guc_version.minor=interface_minor=26;
+    node.test_mapped=true; pt[7]=0xabc001;
+    guc_negotiated=pf_negotiated=false;
+    u32 response[GUC_MAX_MMIO_MSG_LEN]={};
+    int ret=vf_test_mmio_relay(&gt, IOV_OPCODE_VF2PF_MMIO_HANDSHAKE, 1,
+                             FIELD_PREP(VF2PF_MMIO_HANDSHAKE_REQUEST_MSG_1_MAJOR, 1),
+                             0, 0, response);
+    assert(ret==-ENXIO && invalid_state==1 && !handshakes && !updates);
+    assert(node.test_mapped && pt[7]==0xabc001);
+    puts("PASS missing GuC interface rejects old PF handshake before any PTE request");
+
+    vf_bootstrap_unmap_node(&node);
+    assert(!node.test_mapped && pt[7]==1);
+    assert(version_requests==1 && handshakes==1 && updates==1 && !resets && !softresets);
+    assert(invalid_state==1 && !ct_requests);
+    puts("PASS native late clear restores GuC then PF interface without another reset");
+
+    node.test_mapped=true; pt[7]=0xabc001;
+    vf_bootstrap_unmap_node(&node);
+    assert(!node.test_mapped && pt[7]==1 && updates==2);
+    assert(version_requests==1 && handshakes==1);
+    puts("PASS subsequent MMIO clear reuses negotiated interfaces");
+
+    lifetime_setup(); native_mode=true; gt.uc.guc.ct=false;
+    node.test_mapped=true; pt[7]=0xabc001;
+    gt.sriov.vf.test_relay_ready=true; pf_negotiated=true;
+    assert(!xe_guc_softreset(&gt.uc.guc));
+    assert(softresets==1 && !gt.sriov.vf.test_relay_ready && !guc_negotiated);
+    vf_bootstrap_unmap_node(&node);
+    assert(!node.test_mapped && pt[7]==1);
+    assert(version_requests==1 && handshakes==1 && updates==1 && !resets);
+    puts("PASS ordinary client soft reset invalidates cached native relay before late clear");
+
+    lifetime_setup(); native_mode=true; gt.uc.guc.ct=false;
+    node.test_mapped=true; pt[7]=0xabc001;
+    guc_negotiated=false; fail_version=true;
+    if (!setjmp(held)) { vf_bootstrap_unmap_node(&node); assert(0); }
+    assert(node.test_mapped && pt[7]==0xabc001 && !gt.sriov.vf.test_relay_ready);
+    assert(version_requests==1 && !handshakes && !updates && !backing_frees);
+    puts("PASS failed GuC restore retains mapping and backing without PF request");
+
+    lifetime_setup(); native_mode=true; gt.uc.guc.ct=false;
+    node.test_mapped=true; pt[7]=0xabc001; changed_version=true;
+    if (!setjmp(held)) { vf_bootstrap_unmap_node(&node); assert(0); }
+    assert(node.test_mapped && pt[7]==0xabc001 && !gt.sriov.vf.test_relay_ready);
+    assert(version_requests==1 && !handshakes && !updates && !backing_frees);
+    puts("PASS native late clear retains original version consistency check");
+
+    lifetime_setup(); native_mode=true;
+    gt.sriov.vf.test_relay_ready=true; softreset_error=-ENXIO;
+    assert(xe_guc_softreset(&gt.uc.guc)==-ENXIO);
+    assert(softresets==1 && !gt.sriov.vf.test_relay_ready && !updates && !version_requests);
+    puts("PASS client reset error propagates unchanged with native cache invalidated");
+
+    lifetime_setup(); native_mode=true; gt.uc.guc.fw=false;
+    gt.sriov.vf.test_relay_ready=true;
+    assert(!xe_guc_softreset(&gt.uc.guc));
+    assert(!softresets && gt.sriov.vf.test_relay_ready && !updates && !version_requests);
+    puts("PASS stopped firmware retains ordinary soft reset early return");
+
+    lifetime_setup(); native_mode=false; gt.sriov.vf.test_relay_ready=true;
+    assert(!xe_guc_softreset(&gt.uc.guc));
+    assert(softresets==1 && gt.sriov.vf.test_relay_ready && !version_requests && !updates);
+    puts("PASS non-native client soft reset does not change relay cache policy");
     return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='xe-bootstrap-test-') as temp:
     c = Path(temp) / 'test.c'
     exe = Path(temp) / 'test'
-    c.write_text(prefix + constants + mock + helpers + update + quiesce + negotiation + bootstrap + fill + initial + mapper + unmapper + lifetime + finish + fini + remove + main_globals + lifecycle_mocks + experiment + reconnect + main)
+    c.write_text(prefix + constants + mock + helpers + update + quiesce + negotiation + bootstrap + softreset + fill + initial + mapper + unmapper + lifetime + finish + fini + remove + main_globals + lifecycle_mocks + experiment + reconnect + main)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-Wall', '-Wextra',
                     '-Werror', '-Wno-sign-compare', '-Wno-unused-parameter',
                     '-Wno-unused-but-set-variable', *shlex.split(os.environ.get('CFLAGS', '')), '-I', str(xe),

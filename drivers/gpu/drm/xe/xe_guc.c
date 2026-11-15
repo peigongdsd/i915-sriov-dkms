@@ -1462,7 +1462,12 @@ int xe_guc_softreset(struct xe_guc *guc)
 	if (!xe_uc_fw_is_running(&guc->fw))
 		return 0;
 
+	/* A later native GGTT clear must reestablish both relay interfaces. */
+	if (xe_gt_sriov_vf_native(guc_to_xe(guc)))
+		WRITE_ONCE(guc_to_gt(guc)->sriov.vf.test_relay_ready, false);
 	ret = xe_guc_mmio_send(guc, action, ARRAY_SIZE(action));
+	if (xe_gt_sriov_vf_native(guc_to_xe(guc)))
+		xe_gt_info(guc_to_gt(guc), "VFPROBE: normal GuC soft reset returned %d\n", ret);
 	if (ret)
 		return ret;
 
