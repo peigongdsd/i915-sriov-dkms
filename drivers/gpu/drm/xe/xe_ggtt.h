@@ -15,6 +15,9 @@ struct xe_gt;
 struct xe_tile;
 struct drm_exec;
 
+bool xe_ggtt_vf_failed(struct xe_device *xe);
+__noreturn void xe_ggtt_vf_fail(struct xe_gt *gt, const char *stage, int err);
+
 bool xe_ggtt_vf_bootstrap_bo_mapped(struct xe_bo *bo);
 void xe_ggtt_vf_bootstrap_unmap_bo(struct xe_bo *bo);
 void xe_ggtt_vf_bootstrap_finish(struct xe_device *xe);

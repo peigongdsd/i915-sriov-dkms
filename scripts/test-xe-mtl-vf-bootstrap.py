@@ -19,6 +19,7 @@ guc = (xe / 'xe_guc.c').read_text()
 softreset = guc[guc.index('int xe_guc_softreset('):guc.index('int xe_guc_suspend(')]
 helpers = vf[vf.index('static int vf_test_mmio_relay('):
              vf.index('/*\n * Test the working PF')]
+containment = ggtt[ggtt.index('bool xe_ggtt_vf_failed('):ggtt.index('static u64 xelp_ggtt_pte_flags(')]
 update = vf[vf.index('static void vf_test_ct_ggtt('):
             vf.index('/* No GGTT update is outstanding:')]
 quiesce = vf[vf.index('void xe_gt_sriov_vf_bootstrap_quiesce('):
@@ -101,7 +102,8 @@ typedef uint64_t u64;
 #define HZ 1000
 #define atomic_read(p) (*(p))
 #define mutex_lock(p) ((void)0)
-#define mutex_unlock(p) ((void)0)
+#define mutex_unlock(p) ((void)(ggtt_unlocks++))
+static unsigned ggtt_unlocks;
 #define min_t(t,a,b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
 #define lockdep_assert_held(x) ((void)0)
 #define xe_gt_err(...) ((void)0)
@@ -138,7 +140,7 @@ struct mock_mm { struct drm_mm_node *node; u64 size; };
 struct xe_bo;
 struct xe_ggtt;
 struct xe_ggtt_pt_ops { u64 (*pte_encode_flags)(struct xe_bo *, u16); void (*ggtt_set_pte)(struct xe_ggtt *, u64, u64); };
-struct xe_ggtt { struct xe_tile *tile; bool test_used, test_scratch_mapped; struct xe_bo *scratch; const struct xe_ggtt_pt_ops *pt_ops; u64 start, size; struct mock_mm mm; u32 test_ct_maps, test_ct_clears; int lock, test_ct_removed; unsigned flags; };
+struct xe_ggtt { struct xe_tile *tile; bool test_used, test_scratch_mapped, vf_failed; struct xe_bo *scratch; const struct xe_ggtt_pt_ops *pt_ops; u64 start, size; struct mock_mm mm; u32 test_ct_maps, test_ct_clears; int lock, test_ct_removed; unsigned flags; };
 struct xe_ggtt_node { struct xe_ggtt *ggtt; struct drm_mm_node base; bool test_mapped, test_ct_owned, test_temporary, invalidate_on_remove; };
 struct xe_bo { struct xe_ggtt_node *ggtt_node[1]; u64 size; u64 dma[2048]; };
 #define XE_CACHE_WB 0
@@ -326,7 +328,7 @@ static void setup(unsigned pages, bool fragmented)
     ct_requests = ct_fault = ct_fault_at = fail_reset_at = 0;
     fail_handshake = fail_reset = bad_count = false;
     resets = disables = version_requests = version_queries = invalid_state = 0;
-    softresets = 0; softreset_error = 0; interface_minor = 2;
+    softresets = 0; softreset_error = 0; interface_minor = 2; ggtt_unlocks = 0;
     guc_negotiated = true;
     pf_negotiated = fail_version = changed_version = false;
 }
@@ -766,13 +768,31 @@ int main(void)
     assert(!xe_guc_softreset(&gt.uc.guc));
     assert(softresets==1 && gt.sriov.vf.test_relay_ready && !version_requests && !updates);
     puts("PASS non-native client soft reset does not change relay cache policy");
+    setup(4, false); native_mode=true;
+    gt.uc.guc.ct=true; ct_fault=1;
+    if (!setjmp(held)) { vf_bootstrap_map_bo(&ggtt,&bo,flags); assert(0); }
+    assert(ggtt.vf_failed && xe_ggtt_vf_failed(&device));
+    assert(ggtt_unlocks==1 && node.base.allocated && bo.ggtt_node[0]==&node);
+    unsigned sent = ct_requests;
+    if (!setjmp(held)) { xe_gt_sriov_vf_bootstrap_update(&gt,7,flags,1,true); assert(0); }
+    assert(ct_requests==sent && ggtt_unlocks==2);
+    puts("PASS failed native mapping releases shared mutex, retains node, forbids later updates");
+    setup(4, false); native_mode=true;
+    gt.uc.guc.ct=true; vf_bootstrap_map_bo(&ggtt,&bo,flags);
+    ct_fault=1;
+    if (!setjmp(held)) { vf_bootstrap_unmap_node(&node); assert(0); }
+    assert(ggtt.vf_failed && node.test_mapped && node.base.allocated && ggtt_unlocks==1);
+    puts("PASS uncertain native clear retains mapped backing without holding shared mutex");
+    native_mode=false;
+    assert(!xe_ggtt_vf_failed(&device));
+    puts("PASS non-native devices do not inherit diagnostic ioctl failure state");
     return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='xe-bootstrap-test-') as temp:
     c = Path(temp) / 'test.c'
     exe = Path(temp) / 'test'
-    c.write_text(prefix + constants + mock + helpers + update + quiesce + negotiation + bootstrap + softreset + fill + initial + mapper + unmapper + lifetime + finish + fini + remove + main_globals + lifecycle_mocks + experiment + reconnect + main)
+    c.write_text(prefix + constants + mock + helpers + containment + update + quiesce + negotiation + bootstrap + softreset + fill + initial + mapper + unmapper + lifetime + finish + fini + remove + main_globals + lifecycle_mocks + experiment + reconnect + main)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-Wall', '-Wextra',
                     '-Werror', '-Wno-sign-compare', '-Wno-unused-parameter',
                     '-Wno-unused-but-set-variable', *shlex.split(os.environ.get('CFLAGS', '')), '-I', str(xe),

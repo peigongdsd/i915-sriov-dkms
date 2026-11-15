@@ -227,6 +227,8 @@ static long xe_drm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	if (xe_device_wedged(xe))
 		return -ECANCELED;
+	if (xe_ggtt_vf_failed(xe))
+		return -EIO;
 
 	ACQUIRE(xe_pm_runtime_ioctl, pm)(xe);
 	ret = ACQUIRE_ERR(xe_pm_runtime_ioctl, &pm);
@@ -245,6 +247,8 @@ static long xe_drm_compat_ioctl(struct file *file, unsigned int cmd, unsigned lo
 
 	if (xe_device_wedged(xe))
 		return -ECANCELED;
+	if (xe_ggtt_vf_failed(xe))
+		return -EIO;
 
 	ACQUIRE(xe_pm_runtime_ioctl, pm)(xe);
 	ret = ACQUIRE_ERR(xe_pm_runtime_ioctl, &pm);

@@ -143,6 +143,8 @@ struct xe_ggtt {
 	struct xe_bo *scratch;
 	/** @test_used: Bootstrap mappings require quiescence before devres cleanup. */
 	bool test_used;
+	/** @vf_failed: An uncertain VF update forbids further GGTT submissions. */
+	bool vf_failed;
 	/** @test_scratch_mapped: Scratch backing must survive all GGTT holes. */
 	bool test_scratch_mapped;
 	/** @test_ct_removed: Temporary BO's mapping cleared and node removed. */
@@ -167,6 +169,37 @@ struct xe_ggtt {
 	/** @wq: Dedicated unordered work queue to process node removals */
 	struct workqueue_struct *wq;
 };
+
+bool xe_ggtt_vf_failed(struct xe_device *xe)
+{
+	struct xe_tile *tile;
+	u8 id;
+
+	if (!xe_gt_sriov_vf_native(xe))
+		return false;
+	for_each_tile(tile, xe, id)
+		if (tile->mem.ggtt && READ_ONCE(tile->mem.ggtt->vf_failed))
+			return true;
+	return false;
+}
+
+/*
+ * Do not return into TTM destruction while the PF may still reference backing.
+ * Retain this operation, but let unrelated clients leave the GGTT mutex and
+ * fail new ioctls. This is diagnostic containment, not reset or unmap recovery.
+ */
+__noreturn void xe_ggtt_vf_fail(struct xe_gt *gt, const char *stage, int err)
+{
+	struct xe_ggtt *ggtt = gt->tile->mem.ggtt;
+
+	lockdep_assert_held(&ggtt->lock);
+	if (xe_gt_sriov_vf_native(gt_to_xe(gt))) {
+		WRITE_ONCE(ggtt->vf_failed, true);
+		mutex_unlock(&ggtt->lock);
+		xe_gt_err(gt, "VFPROBE: GGTT failed; shared mutex released, new ioctls rejected; retaining affected operation\n");
+	}
+	xe_gt_sriov_vf_test_hold(gt, stage, err);
+}
 
 static u64 xelp_ggtt_pte_flags(struct xe_bo *bo, u16 pat_index)
 {
@@ -318,10 +351,10 @@ static void vf_bootstrap_fill(struct xe_ggtt *ggtt, u64 start, u64 size, u64 pte
 	lockdep_assert_held(&ggtt->lock);
 	if (start < ggtt->start || !IS_ALIGNED(start, XE_PAGE_SIZE) ||
 	    !IS_ALIGNED(size, XE_PAGE_SIZE))
-		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "invalid GGTT fill", -EINVAL);
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt, "invalid GGTT fill", -EINVAL);
 	offset = start - ggtt->start;
 	if (offset > ggtt->size || size > ggtt->size - offset)
-		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "GGTT fill outside allocation",
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt, "GGTT fill outside allocation",
 					   -ERANGE);
 	page = offset >> XE_PTE_SHIFT;
 	left = size >> XE_PTE_SHIFT;
@@ -418,9 +451,11 @@ static void ggtt_fini(void *arg)
 		ggtt->test_scratch_mapped = false;
 		xe_tile_info(ggtt->tile, "VFPROBE: scratch references cleared at normal GGTT fini\n");
 	}
-	if (ggtt->test_scratch_mapped)
-		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt, "scratch still mapped at fini",
-					   -EBUSY);
+	if (ggtt->test_scratch_mapped) {
+		guard(mutex)(&ggtt->lock);
+
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt, "scratch still mapped at fini", -EBUSY);
+	}
 	ggtt->scratch = NULL;
 }
 
@@ -602,7 +637,7 @@ static void vf_bootstrap_unmap_node(struct xe_ggtt_node *node)
 		return;
 	if (xe_gt_sriov_vf_bootstrap_test(tile_to_xe(ggtt->tile)) &&
 	    !node->test_ct_owned && xe_guc_ct_enabled(&ggtt->tile->primary_gt->uc.guc.ct))
-		xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
+		xe_ggtt_vf_fail(ggtt->tile->primary_gt,
 					   "bootstrap consumer released with CT active", -EBUSY);
 	vf_bootstrap_fill(ggtt, ggtt->start + node->base.start, node->base.size, pte);
 	node->test_mapped = false;
@@ -718,7 +753,7 @@ static void ggtt_node_remove(struct xe_ggtt_node *node)
 	bound = ggtt->flags & XE_GGTT_FLAGS_ONLINE;
 	if (xe_gt_sriov_vf_ggtt_relay(tile_to_xe(ggtt->tile))) {
 		if (node->test_mapped)
-			xe_gt_sriov_vf_test_hold(ggtt->tile->primary_gt,
+			xe_ggtt_vf_fail(ggtt->tile->primary_gt,
 						   "late mapped-node removal", -EBUSY);
 	} else if (bound)
 		xe_ggtt_clear(ggtt, xe_ggtt_node_addr(node), xe_ggtt_node_size(node));
@@ -1195,6 +1230,11 @@ struct xe_ggtt_node *xe_ggtt_insert_node_transform(struct xe_ggtt *ggtt,
 		goto err;
 	}
 
+	if (READ_ONCE(ggtt->vf_failed)) {
+		ret = -EIO;
+		goto err_unlock;
+	}
+
 	ret = xe_ggtt_insert_node_locked(node, size, align, 0);
 	if (ret)
 		goto err_unlock;
@@ -1274,6 +1314,12 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 	}
 
 	mutex_lock(&ggtt->lock);
+	if (READ_ONCE(ggtt->vf_failed)) {
+		ggtt_node_fini(bo->ggtt_node[tile_id]);
+		bo->ggtt_node[tile_id] = NULL;
+		err = -EIO;
+		goto unlock;
+	}
 	/*
 	 * When inheriting the initial framebuffer, the framebuffer is
 	 * physically located at VRAM address 0, and usually at GGTT address 0 too.
@@ -1320,6 +1366,7 @@ static int __xe_ggtt_insert_bo_at(struct xe_ggtt *ggtt, struct xe_bo *bo,
 			xe_ggtt_map_bo(ggtt, bo->ggtt_node[tile_id], bo, pte);
 		}
 	}
+unlock:
 	mutex_unlock(&ggtt->lock);
 
 	if (!err && bo->flags & XE_BO_FLAG_GGTT_INVALIDATE)
