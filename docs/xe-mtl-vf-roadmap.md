@@ -9,13 +9,13 @@ Keep platform differences at the GGTT access and early transport boundaries.
 
 | Stage | Status | Evidence or acceptance condition |
 | --- | --- | --- |
-| PF and assigned Windows VF | Reported working | Preserve host generation 204 / PF 02acd04 as the test baseline. |
+| PF and assigned Windows VF | Reported working | Current guest test host is generation 207 / PF b0aa9a8; preserve its pin. |
 | Native guest bootstrap and CT GGTT | V6 reported passed | Memirq delivery, native CT query, temporary mapping/release/reuse and acknowledged cleanup. |
-| Scratch and expected communication reset | V7 implemented, awaiting hardware | Normal hole setup, CT reconnection, post-reset temporary lifetimes, full-range cleanup. |
-| First engine work | V8 full native mode implemented, untested | Ordinary Xe default-context jobs; record wait and fence status without replacing the scheduler. |
-| Complete guest probe | V8 attempts normal full probe, untested | Primary and media initialization and DRM registration; see `xe-mtl-vf-native-test.md`. |
-| Useful guest workload | Not tested | Verify GPU-written results, then a small graphics workload and repeated allocate/submit/release. |
-| Lifecycle and native host VF | Same V8 implementation, untested | Normal cleanup/reload, workload and recovery evidence in the guest; then bind the host VF with the same path. |
+| Scratch and expected communication reset | V7 standalone diagnostic untested | V8 subsequently exercised normal scratch/probe; diagnostic reset cycle remains separate. |
+| First engine work | V8 passed | Ten ordinary initialization jobs across rcs0, bcs0, ccs0, vcs0 and vecs0, positive waits and fence status 1. |
+| Complete guest probe | V8 passed | Both GTs, native probe return 0, DRM render node and normal PM initialization. |
+| Useful guest workload | V8 basic-store passed | IGT checked a GPU store in system memory; graphics workloads and sustained reuse remain. |
+| Lifecycle and native host VF | V8 unload failed; V8.1 fix prepared | Validate interface restoration and unload/reload/store in the guest, then native host VF with the same implementation. |
 | Upstream review series | Not ready | Remove experiments, complete error handling, review normal-path cost and document hardware coverage. |
 
 V6's PF acknowledgements and interrupts do not prove engine execution or
@@ -37,6 +37,12 @@ counter, force scheduler threads into holds, change timeouts or pin the device
 awake. The full-probe option selects the PF-mediated GGTT backend while leaving
 the old bootstrap-only diagnostic separate. Test normal workload and cleanup
 with ample diagnostics, then fix concrete failures at their actual boundary.
+
+V8.1 addresses the observed late-unload MMIO handshake rejection. Restore the
+GuC version interface through the existing helper before the PF handshake, and
+invalidate the cached relay state on normal client soft reset as well as VF
+reset. Preserve the ordinary reset, CT shutdown and BO release ordering. This
+is a candidate fix for a captured failure, not a completed lifecycle result.
 
 ## Shape of the eventual review series
 

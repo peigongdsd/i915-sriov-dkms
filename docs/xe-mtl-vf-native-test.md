@@ -1,7 +1,7 @@
-# Meteor Lake native Xe VF, v8
+# Meteor Lake native Xe VF, v8.1
 
-Branch: `codex/xe-mtl-vf-native-v8`.
-Base: v7 `46ade22071cabcc1f5f2643aa2009d614cd46da1`.
+Branch: `codex/xe-mtl-vf-native-v8.1`.
+Base: v8 `7b67c2f436d8118ef2d3b96686237955cdbd8d6c`.
 Use the exact commit supplied with the handoff.
 
 ## Run full probe
@@ -33,7 +33,10 @@ PTE writer also routes through the PF, without issuing the CPU-write workaround
 on the VF. PAT encoding, Xe's allocator, memirq, CT, default contexts, scheduler,
 queue destruction, reset and power-management policy remain the normal paths.
 
-The early PF relay handshake is renegotiated after Xe's normal VF reset. Native
+V8.1 restores the GuC interface before negotiating the PF MMIO relay interface
+when the native relay cache is invalid. Both normal VF reset and client soft
+reset invalidate that cache. The existing version helper requires the previous
+GuC interface version; subsequent MMIO updates reuse the connection. Native
 GGTT updates select the enabled CT transport or early MMIO transport without the
 old experiment's artificial CT-phase requirements. This does not add retries to
 a submitted GGTT update whose completion is unknown.
@@ -51,9 +54,9 @@ restricted VF GGTT access do not mean that MTL lacks that interrupt feature.
 
 ## Guest handoff
 
-1. Preserve the running host profile, PF pin and boot entries. Obtain the final
-   generation-207 comparison report when available, without treating its
-   unfinished observation as a pass. Reuse the existing Linux 7.3.3 guest and
+1. Start after separately coordinated recovery of the held v8 VM. Rebuilding
+   does not change that VM or resolve its held unload. Preserve the running
+   generation-207 host profile, PF pin and boot entries. Reuse Linux 7.3.3 and the
    exact build tree; build both modules with `KCFLAGS=-g` and retain the original
    debug copies. Record commit, SHA-256, vermagic and srcversion.
 2. Use the established host-local serial and host-kernel captures. Keep Windows
@@ -73,8 +76,11 @@ restricted VF GGTT access do not mean that MTL lacks that interrupt feature.
    If IGT is missing, report that separately from the probe result and prepare
    it using the local package configuration. Do not silently substitute a NOP.
 5. With successful workload completion, close test clients, unload the guest Xe
-   module normally, reload it once, and repeat the basic store. Capture normal
-   cleanup and reload results. Then shut down the guest normally and confirm
+   module normally, reload it once, and repeat the basic store. Record explicit
+   unload and reload return codes. Capture each GT's normal GuC soft/VF reset
+   results, `MMIO GGTT GuC interface restored`, PF relay readiness and mapping
+   clears. A restore marker alone is not completed unload. The live identity
+   must be `mtl-native-v8.1`. Then shut down the guest normally and confirm
    QEMU exit, VFIO-group release and host health. Do not use the old automatic
    SysRq-after-expected-rejection script: this mode leaves a live DRM driver.
 6. On an error or crash, preserve the full captures and report the last operation,
@@ -89,9 +95,18 @@ Use the tested package's identity and actual subtest list in the report.
 
 ## Evidence boundary and remaining work
 
-V6 establishes the reported CT/map/clear/bootstrap result. V7 has no accepted
-hardware run. The generation-207 host comparison was still running at the last
-provided update. None of that establishes v8 full probe or Linux graphics.
+V8 passed full native probe, primary/media GT initialization, ten engine
+initialization jobs, four IGT queries and `xe_exec_store basic-store` with checked
+GPU output on Linux 7.3.3. Normal unload then held during late BO destruction:
+GuC rejected the PF MMIO handshake with INVALID_STATE before the clear request
+was sent. Reload, second store and shutdown were not reached. See
+`xe-mtl-vf-native-v8-results.md` for the evidence and source analysis.
+
+V8.1 corrects this missing interface restoration; hardware confirmation of
+unload and reload remains required. Successful basic-store is evidence of GPU
+execution, not a display/compositor workload or every engine's full coverage.
+The provided host captures flagged no new GPU error during v8; that does not
+establish the final outcome of the earlier generation-207 comparison.
 
 This branch is a full-probe experiment, not a production-support declaration.
 The ordinary scheduler and recovery paths are deliberately exercised, not
